@@ -26,14 +26,18 @@ var _ mempool.Mempool = (*TxMempool)(nil)
 // TxMempoolOption sets an optional parameter on the TxMempool.
 type TxMempoolOption func(*TxMempool)
 
-// TxMempool defines a prioritized mempool data structure used by the v1 mempool
-// reactor. It keeps a thread-safe priority queue of transactions that is used
-// when a block proposer constructs a block and a thread-safe linked-list that
-// is used to gossip transactions to peers in a FIFO manner.
+// TxMempool implemements the Mempool interface and allows the application to
+// set priority values on transactions in the CheckTx response. When selecting
+// transactions to include in a block, higher-priority transactions are chosen
+// first.  When evicting transactions from the mempool for size constraints,
+// lower-priority transactions are evicted sooner.
+//
+// Within the mempool, transactions are ordered in order of arrival, and are
+// gossiped to the rest of the network based on that order (gossip order does
+// not take priority into account).
 type TxMempool struct {
-	// Atomic integers
-	height   int64 // the last block Update()'d to
-	txsBytes int64 // total size of mempool, in bytes
+	height   int64 // atomic: the latest height passed to Update
+	txsBytes int64 // atomic: the total size of all transactions in the mempool, in bytes
 
 	// notify listeners (ie. consensus) when txs are available
 	notifiedTxsAvailable bool
@@ -68,6 +72,8 @@ type TxMempool struct {
 	metrics *mempool.Metrics
 }
 
+// NewTxMempool constructs a new, empty priority mempool at the specified
+// initial height and using the given config and options.
 func NewTxMempool(
 	logger log.Logger,
 	cfg *config.MempoolConfig,
@@ -119,45 +125,24 @@ func WithMetrics(metrics *mempool.Metrics) TxMempoolOption {
 
 // Lock obtains a write-lock on the mempool. A caller must be sure to explicitly
 // release the lock when finished.
-func (txmp *TxMempool) Lock() {
-	txmp.mtx.Lock()
-}
+func (txmp *TxMempool) Lock() { txmp.mtx.Lock() }
 
 // Unlock releases a write-lock on the mempool.
-func (txmp *TxMempool) Unlock() {
-	txmp.mtx.Unlock()
-}
+func (txmp *TxMempool) Unlock() { txmp.mtx.Unlock() }
 
 // Size returns the number of valid transactions in the mempool. It is
 // thread-safe.
-func (txmp *TxMempool) Size() int {
-	return txmp.txStore.Size()
-}
+func (txmp *TxMempool) Size() int { return txmp.txs.Size() }
 
 // SizeBytes return the total sum in bytes of all the valid transactions in the
 // mempool. It is thread-safe.
-func (txmp *TxMempool) SizeBytes() int64 {
-	return atomic.LoadInt64(&txmp.sizeBytes)
-}
+func (txmp *TxMempool) SizeBytes() int64 { return atomic.LoadInt64(&txmp.sizeBytes) }
 
 // FlushAppConn executes FlushSync on the mempool's proxyAppConn.
 //
 // NOTE: The caller must obtain a write-lock via Lock() prior to execution.
 func (txmp *TxMempool) FlushAppConn() error {
 	return txmp.proxyAppConn.FlushSync(context.Background())
-}
-
-// WaitForNextTx returns a blocking channel that will be closed when the next
-// valid transaction is available to gossip. It is thread-safe.
-func (txmp *TxMempool) WaitForNextTx() <-chan struct{} {
-	return txmp.gossipIndex.WaitChan()
-}
-
-// NextGossipTx returns the next valid transaction to gossip. A caller must wait
-// for WaitForNextTx to signal a transaction is available to gossip first. It is
-// thread-safe.
-func (txmp *TxMempool) NextGossipTx() *clist.CElement {
-	return txmp.gossipIndex.Front()
 }
 
 // EnableTxsAvailable enables the mempool to trigger events when transactions
@@ -171,9 +156,7 @@ func (txmp *TxMempool) EnableTxsAvailable() {
 
 // TxsAvailable returns a channel which fires once for every height, and only
 // when transactions are available in the mempool. It is thread-safe.
-func (txmp *TxMempool) TxsAvailable() <-chan struct{} {
-	return txmp.txsAvailable
-}
+func (txmp *TxMempool) TxsAvailable() <-chan struct{} { return txmp.txsAvailable }
 
 // CheckTx executes the ABCI CheckTx method for a given transaction. It acquires
 // a read-lock attempts to execute the application's CheckTx ABCI method via
@@ -205,21 +188,21 @@ func (txmp *TxMempool) CheckTx(
 	txmp.mtx.RLock()
 	defer txmp.mtx.RUnlock()
 
-	txSize := len(tx)
-	if txSize > txmp.config.MaxTxBytes {
-		return types.ErrTxTooLarge{
-			Max:    txmp.config.MaxTxBytes,
-			Actual: txSize,
+	// Reject transactions in excess of the configured maximum size.
+	if len(tx) > txmp.config.MaxTxBytes {
+		return types.ErrTxTooLarge{Max: txmp.config.MaxTxBytes, Actual: len(tx)}
+	}
+
+	// If a precheck hook is defined, call it before invoking the application.
+	if txmp.preCheck != nil {
+		if err := txmp.preCheck(tx); err != nil {
+			return types.ErrPreCheck{Reason: err}
 		}
 	}
 
-	if txmp.preCheck != nil {
-		if err := txmp.preCheck(tx); err != nil {
-			return types.ErrPreCheck{
-				Reason: err,
-			}
-		}
-	}
+	// If the transaction is already cached and is also in the mempool, reject
+	// it.  The mempool check is because we do not remove transactions from the
+	// cache when they are reaped
 
 	if err := txmp.proxyAppConn.Error(); err != nil {
 		return err
