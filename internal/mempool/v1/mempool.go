@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,66 +31,41 @@ type TxMempoolOption func(*TxMempool)
 // when a block proposer constructs a block and a thread-safe linked-list that
 // is used to gossip transactions to peers in a FIFO manner.
 type TxMempool struct {
-	logger       log.Logger
-	metrics      *mempool.Metrics
-	config       *config.MempoolConfig
+	// Atomic integers
+	height   int64 // the last block Update()'d to
+	txsBytes int64 // total size of mempool, in bytes
+
+	// notify listeners (ie. consensus) when txs are available
+	notifiedTxsAvailable bool
+	txsAvailable         chan struct{} // fires once for each height, when the mempool is not empty
+
+	config *config.MempoolConfig
+
+	// Exclusive mutex for Update method to prevent concurrent execution of
+	// CheckTx or ReapMaxBytesMaxGas(ReapMaxTxs) methods.
+	updateMtx tmsync.RWMutex
+	preCheck  mempool.PreCheckFunc
+	postCheck mempool.PostCheckFunc
+
+	txs          *clist.CList // concurrent linked-list of good txs
 	proxyAppConn proxy.AppConnMempool
 
-	// txsAvailable fires once for each height when the mempool is not empty
-	txsAvailable         chan struct{}
-	notifiedTxsAvailable bool
-
-	// height defines the last block height process during Update()
-	height int64
-
-	// sizeBytes defines the total size of the mempool (sum of all tx bytes)
-	sizeBytes int64
-
-	// cache defines a fixed-size cache of already seen transactions as this
-	// reduces pressure on the proxyApp.
-	cache mempool.TxCache
-
-	// txStore defines the main storage of valid transactions. Indexes are built
-	// on top of this store.
-	txStore *TxStore
-
-	// gossipIndex defines the gossiping index of valid transactions via a
-	// thread-safe linked-list. We also use the gossip index as a cursor for
-	// rechecking transactions already in the mempool.
-	gossipIndex *clist.CList
-
-	// recheckCursor and recheckEnd are used as cursors based on the gossip index
-	// to recheck transactions that are already in the mempool. Iteration is not
-	// thread-safe and transaction may be mutated in serial order.
-	//
-	// XXX/TODO: It might be somewhat of a codesmell to use the gossip index for
-	// iterator and cursor management when rechecking transactions. If the gossip
-	// index changes or is removed in a future refactor, this will have to be
-	// refactored. Instead, we should consider just keeping a slice of a snapshot
-	// of the mempool's current transactions during Update and an integer cursor
-	// into that slice. This, however, requires additional O(n) space complexity.
+	// Track whether we're rechecking txs.
+	// These are not protected by a mutex and are expected to be mutated in
+	// serial (ie. by abci responses which are called in serial).
 	recheckCursor *clist.CElement // next expected response
 	recheckEnd    *clist.CElement // re-checking stops here
 
-	// priorityIndex defines the priority index of valid transactions via a
-	// thread-safe priority queue.
-	priorityIndex *TxPriorityQueue
+	// Map for quick access to txs to record sender in CheckTx.
+	// txsMap: txKey -> CElement
+	txsMap sync.Map
 
-	// heightIndex defines a height-based, in ascending order, transaction index.
-	// i.e. older transactions are first.
-	heightIndex *WrappedTxList
+	// Keep a cache of already-seen txs.
+	// This reduces the pressure on the proxyApp.
+	cache mempool.TxCache
 
-	// timestampIndex defines a timestamp-based, in ascending order, transaction
-	// index. i.e. older transactions are first.
-	timestampIndex *WrappedTxList
-
-	// A read/write lock is used to safe guard updates, insertions and deletions
-	// from the mempool. A read-lock is implicitly acquired when executing CheckTx,
-	// however, a caller must explicitly grab a write-lock via Lock when updating
-	// the mempool via Update().
-	mtx       tmsync.RWMutex
-	preCheck  mempool.PreCheckFunc
-	postCheck mempool.PostCheckFunc
+	logger  log.Logger
+	metrics *mempool.Metrics
 }
 
 func NewTxMempool(
@@ -101,21 +77,12 @@ func NewTxMempool(
 ) *TxMempool {
 
 	txmp := &TxMempool{
-		logger:        logger,
-		config:        cfg,
-		proxyAppConn:  proxyAppConn,
-		height:        height,
-		cache:         mempool.NopTxCache{},
-		metrics:       mempool.NopMetrics(),
-		txStore:       NewTxStore(),
-		gossipIndex:   clist.New(),
-		priorityIndex: NewTxPriorityQueue(),
-		heightIndex: NewWrappedTxList(func(wtx1, wtx2 *WrappedTx) bool {
-			return wtx1.height >= wtx2.height
-		}),
-		timestampIndex: NewWrappedTxList(func(wtx1, wtx2 *WrappedTx) bool {
-			return wtx1.timestamp.After(wtx2.timestamp) || wtx1.timestamp.Equal(wtx2.timestamp)
-		}),
+		logger:       logger,
+		config:       cfg,
+		proxyAppConn: proxyAppConn,
+		height:       height,
+		cache:        mempool.NopTxCache{},
+		metrics:      mempool.NopMetrics(),
 	}
 
 	if cfg.CacheSize > 0 {
