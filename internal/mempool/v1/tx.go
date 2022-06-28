@@ -4,7 +4,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/tendermint/tendermint/internal/libs/clist"
 	tmsync "github.com/tendermint/tendermint/internal/libs/sync"
 	"github.com/tendermint/tendermint/types"
 )
@@ -12,45 +11,14 @@ import (
 // WrappedTx defines a wrapper around a raw transaction with additional metadata
 // that is used for indexing.
 type WrappedTx struct {
-	// tx represents the raw binary transaction data
-	tx types.Tx
-
-	// hash defines the transaction hash and the primary key used in the mempool
-	hash types.TxKey
-
-	// height defines the height at which the transaction was validated at
-	height int64
-
-	// gasWanted defines the amount of gas the transaction sender requires
-	gasWanted int64
-
-	// priority defines the transaction's priority as specified by the application
-	// in the ResponseCheckTx response.
-	priority int64
-
-	// sender defines the transaction's sender as specified by the application in
-	// the ResponseCheckTx response.
-	sender string
-
-	// timestamp is the time at which the node first received the transaction from
-	// a peer. It is used as a second dimension is prioritizing transactions when
-	// two transactions have the same priority.
-	timestamp time.Time
-
-	// peers records a mapping of all peers that sent a given transaction
-	peers map[uint16]struct{}
-
-	// heapIndex defines the index of the item in the heap
-	heapIndex int
-
-	// gossipEl references the linked-list element in the gossip index
-	gossipEl *clist.CElement
-
-	// removed marks the transaction as removed from the mempool. This is set
-	// during RemoveTx and is needed due to the fact that a given existing
-	// transaction in the mempool can be evicted when it is simultaneously having
-	// a reCheckTx callback executed.
-	removed bool
+	tx        types.Tx        // the original transaction data
+	hash      types.TxKey     // the transaction hash
+	height    int64           // height at which this transaction was checked (for expiry)
+	timestamp time.Time       // time at which transaction was received (for TTL)
+	gasWanted int64           // app: gas required to execute this transaction
+	priority  int64           // app: priority value for this transaction
+	sender    string          // app: assigned sender label
+	peers     map[uint16]bool // peer IDs who have sent us this transaction
 }
 
 func (wtx *WrappedTx) Size() int {
