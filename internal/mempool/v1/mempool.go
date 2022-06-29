@@ -158,26 +158,25 @@ func (txmp *TxMempool) EnableTxsAvailable() {
 // when transactions are available in the mempool. It is thread-safe.
 func (txmp *TxMempool) TxsAvailable() <-chan struct{} { return txmp.txsAvailable }
 
-// CheckTx executes the ABCI CheckTx method for a given transaction. It acquires
-// a read-lock attempts to execute the application's CheckTx ABCI method via
-// CheckTxAsync. We return an error if any of the following happen:
+// CheckTx adds the given transaction to the mempool if it fits and passes the
+// application's ABCI CheckTx method.
 //
-// - The CheckTxAsync execution fails.
-// - The transaction already exists in the cache and we've already received the
-//   transaction from the peer. Otherwise, if it solely exists in the cache, we
-//   return nil.
-// - The transaction size exceeds the maximum transaction size as defined by the
-//   configuration provided to the mempool.
-// - The transaction fails Pre-Check (if it is defined).
-// - The proxyAppConn fails, e.g. the buffer is full.
+// CheckTx reports an error without adding tx if:
 //
-// If the mempool is full, we still execute CheckTx and attempt to find a lower
-// priority transaction to evict. If such a transaction exists, we remove the
-// lower priority transaction and add the new one with higher priority.
+// - The size of tx exceeds the configured maximum transaction size.
+// - The pre-check hook is defined and reports an error for tx.
+// - The transaction already exists in the cache.
+// - The proxy connection to the application fails.
 //
-// NOTE:
-// - The applications' CheckTx implementation may panic.
-// - The caller is not to explicitly require any locks for executing CheckTx.
+// If tx passes all of the above conditions, it is passed (asynchronously) to
+// the application's ABCI CheckTx method and this CheckTx method returns nil.
+// If cb != nil, it is called when the ABCI request completes to report the
+// application response.
+//
+// If the application accepts the transaction and the mempool is full, the
+// mempool evicts the lowest-priority transaction whose priority is (strictly)
+// lower than the priority of tx, and adds tx instead. If no such transaction
+// exists, tx is discarded.
 func (txmp *TxMempool) CheckTx(
 	ctx context.Context,
 	tx types.Tx,
@@ -185,6 +184,8 @@ func (txmp *TxMempool) CheckTx(
 	txInfo mempool.TxInfo,
 ) error {
 
+	// N.B. We acquire a reader lock here only to exclude checks from happening
+	// concurrently with modifications (e.g., evictions). This
 	txmp.mtx.RLock()
 	defer txmp.mtx.RUnlock()
 
@@ -200,15 +201,21 @@ func (txmp *TxMempool) CheckTx(
 		}
 	}
 
-	// If the transaction is already cached and is also in the mempool, reject
-	// it.  The mempool check is because we do not remove transactions from the
-	// cache when they are reaped
+	txKey := tx.Key()
+
+	// Check for the transaction in the cache.
+	if !txmp.cache.Push(tx) {
+		// If the cached transaction is also in the pool, record its sender.
+		if e, ok := txmp.txMap.Load(txKey); ok {
+			w := e.(*clist.CElement).Value.(*WrappedTx)
+			w.senders[txInfo.SenderID] = true // FIXME: synchronize
+		}
+		return types.ErrTxInCache
+	}
 
 	if err := txmp.proxyAppConn.Error(); err != nil {
 		return err
 	}
-
-	txHash := tx.Key()
 
 	// We add the transaction to the mempool's cache and if the
 	// transaction is already present in the cache, i.e. false is returned, then we
