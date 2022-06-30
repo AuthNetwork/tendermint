@@ -383,57 +383,61 @@ func (mem *CListMempool) resCbFirstTime(
 	peerP2PID types.NodeID,
 	res *abci.Response,
 ) {
-	switch r := res.Value.(type) {
-	case *abci.Response_CheckTx:
-		var postCheckErr error
-		if mem.postCheck != nil {
-			postCheckErr = mem.postCheck(tx, r.CheckTx)
-		}
-		if (r.CheckTx.Code == abci.CodeTypeOK) && postCheckErr == nil {
-			// Check mempool isn't full again to reduce the chance of exceeding the
-			// limits.
-			if err := mem.isFull(len(tx)); err != nil {
-				// remove from cache (mempool might have a space later)
-				mem.cache.Remove(tx)
-				mem.logger.Error(err.Error())
-				return
-			}
-
-			memTx := &mempoolTx{
-				height:    mem.height,
-				gasWanted: r.CheckTx.GasWanted,
-				tx:        tx,
-			}
-			memTx.senders.Store(peerID, true)
-			mem.addTx(memTx)
-			mem.logger.Debug(
-				"added good transaction",
-				"tx", types.Tx(tx).Hash(),
-				"res", r,
-				"height", memTx.height,
-				"total", mem.Size(),
-			)
-			mem.notifyTxsAvailable()
-		} else {
-			// ignore bad transaction
-			mem.logger.Debug(
-				"rejected bad transaction",
-				"tx", types.Tx(tx).Hash(),
-				"peerID", peerP2PID,
-				"res", r,
-				"err", postCheckErr,
-			)
-			mem.metrics.FailedTxs.Add(1)
-
-			if !mem.config.KeepInvalidTxsInCache {
-				// remove from cache (it might be good later)
-				mem.cache.Remove(tx)
-			}
-		}
-
-	default:
-		// ignore other messages
+	r, ok := res.Value.(type).(*abci.Response_CheckTx)
+	if !ok {
+		return // ignore other message types
 	}
+
+	var postCheckErr error
+	if txmp.postCheck != nil {
+		postCheckErr = txmp.postCheck(tx, r.CheckTx)
+	}
+
+	if r.CheckTx.Code != abci.CodeTypeOK || postCheckErr != nil {
+		mem.logger.Debug(
+			"rejected bad transaction",
+			"tx", types.Tx(tx).Hash(),
+			"peerID", peerP2PID,
+			"res", r,
+			"err", err,
+		)
+		mem.metrics.FailedTxs.Add(1)
+
+		// Remove the invalid transaction from the cache, unless the operator has
+		// instructed us to do otherwise.
+		if !mem.config.KeepInvalidTxsInCache {
+			mem.cache.Remove(tx)
+		}
+
+		return
+	}
+
+	// At this point the application has ruled the transaction valid, but the
+	// mempool might be full. If so, find the lowest-priority item with lower
+	// priority than the application assigned to this new one, and evict it in
+	// favor of tx. If no such item exists, we discard tx.
+	if err := mem.isFull(len(tx)); err != nil {
+		// remove from cache (mempool might have a space later)
+		mem.cache.Remove(tx)
+		mem.logger.Error(err.Error())
+		return
+	}
+
+	memTx := &mempoolTx{
+		height:    mem.height,
+		gasWanted: r.CheckTx.GasWanted,
+		tx:        tx,
+	}
+	memTx.senders.Store(peerID, true)
+	mem.addTx(memTx)
+	mem.logger.Debug(
+		"added good transaction",
+		"tx", types.Tx(tx).Hash(),
+		"res", r,
+		"height", memTx.height,
+		"total", mem.Size(),
+	)
+	mem.notifyTxsAvailable()
 }
 
 // callback, which is called after the app rechecked the tx.
