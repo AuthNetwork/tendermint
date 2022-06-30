@@ -443,29 +443,19 @@ func (txmp *TxMempool) Update(
 	return nil
 }
 
-// initTxCallback performs the initial, i.e. the first, callback after CheckTx
-// has been executed by the ABCI application. In other words, initTxCallback is
-// called after executing CheckTx when we see a unique transaction for the first
-// time. CheckTx can be called again for the same transaction at a later point
-// in time when re-checking, however, this callback will not be called.
+// initTxCallback handle the ABCI CheckTx response for the first time a
+// transaction is added to the mempool, rather than a recheck after a block is
+// committed.
 //
-// After the ABCI application executes CheckTx, initTxCallback is called with
-// the ABCI *Response object and TxInfo. If postCheck is defined on the mempool,
-// we execute that first. If there is no error from postCheck (if defined) and
-// the ABCI CheckTx response code is OK, we attempt to insert the transaction.
+// If either the application rejected the transaction or a post-check hook is
+// defined and rejects the transaction, it is discarded.
 //
-// When attempting to insert the transaction, we first check if there is
-// sufficient capacity. If there is sufficient capacity, the transaction is
-// inserted into the txStore and indexed across all indexes. Otherwise, if the
-// mempool is full, we attempt to find a lower priority transaction to evict in
-// place of the new incoming transaction. If no such transaction exists, the
-// new incoming transaction is rejected.
+// Otherwise, if the mempool is full, check for a lower-priority transaction
+// that can be evicted to make room for the new one. If no such transaction
+// exists, this transaction is logged and dropped; otherwise the selected
+// transaction is evicted.
 //
-// If the new incoming transaction fails CheckTx or postCheck fails, we reject
-// the new incoming transaction.
-//
-// NOTE:
-// - An explicit lock is NOT required.
+// Finally, the new transaction is added and size stats updated.
 func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo mempool.TxInfo) {
 	checkTxRes, ok := res.Value.(*abci.Response_CheckTx)
 	if !ok {
@@ -478,7 +468,6 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 	}
 
 	if err != nil || checkTxRes.CheckTx.Code != abci.CodeTypeOK {
-		// ignore bad transactions
 		txmp.logger.Info(
 			"rejected bad transaction",
 			"priority", wtx.priority,
@@ -490,31 +479,45 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 
 		txmp.metrics.FailedTxs.Add(1)
 
+		// Remove the invalid transaction from the cache, unless the operator has
+		// instructed us to do otherwise.
 		if !txmp.config.KeepInvalidTxsInCache {
 			txmp.cache.Remove(wtx.tx)
 		}
+
+		// If there was a post-check error, record its text in the result for
+		// debugging purposes.
 		if err != nil {
 			checkTxRes.CheckTx.MempoolError = err.Error()
 		}
 		return
 	}
 
-	sender := checkTxRes.CheckTx.Sender
-	priority := checkTxRes.CheckTx.Priority
+	// FIXME: Do we actually want this? The old mempool doesn't do it.  Inclined
+	// to leave it out without a good reason.
+	//
+	// 	sender := checkTxRes.CheckTx.Sender
+	// 	priority := checkTxRes.CheckTx.Priority
+	//
+	// 	if sender != "" {
+	// 		if wtx := txmp.txStore.GetTxBySender(sender); wtx != nil {
+	// 			txmp.logger.Error(
+	// 				"rejected incoming good transaction; tx already exists for sender",
+	// 				"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
+	// 				"sender", sender,
+	// 			)
+	// 			txmp.metrics.RejectedTxs.Add(1)
+	// 			return
+	// 		}
+	// 	}
 
-	if len(sender) > 0 {
-		if wtx := txmp.txStore.GetTxBySender(sender); wtx != nil {
-			txmp.logger.Error(
-				"rejected incoming good transaction; tx already exists for sender",
-				"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
-				"sender", sender,
-			)
-			txmp.metrics.RejectedTxs.Add(1)
-			return
-		}
-	}
+	// At this point the application has ruled the transaction valid, but the
+	// mempool might be full. If so, find the lowest-priority item with lower
+	// priority than the application assigned to this new one, and evict it in
+	// favor of tx. If no such item exists, we discard tx.
 
 	if err := txmp.canAddTx(wtx); err != nil {
+
 		evictTxs := txmp.priorityIndex.GetEvictableTxs(
 			priority,
 			int64(wtx.Size()),
@@ -713,8 +716,8 @@ func (txmp *TxMempool) updateReCheckTxs() {
 }
 
 // canAddTx returns an error if we cannot insert the provided *WrappedTx into
-// the mempool due to mempool configured constraints. Otherwise, nil is returned
-// and the transaction can be inserted into the mempool.
+// the mempool due to mempool configured constraints. Otherwise, nil is
+// returned and the transaction can be inserted into the mempool.
 func (txmp *TxMempool) canAddTx(wtx *WrappedTx) error {
 	var (
 		numTxs    = txmp.Size()
