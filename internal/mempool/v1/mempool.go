@@ -189,7 +189,7 @@ func (txmp *TxMempool) CheckTx(
 	txmp.mtx.RLock()
 	defer txmp.mtx.RUnlock()
 
-	// Reject transactions in excess of the configured maximum size.
+	// Reject transactions in excess of the configured maximum transaction size.
 	if len(tx) > txmp.config.MaxTxBytes {
 		return types.ErrTxTooLarge{Max: txmp.config.MaxTxBytes, Actual: len(tx)}
 	}
