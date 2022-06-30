@@ -225,10 +225,6 @@ func (txmp *TxMempool) CheckTx(
 		return types.ErrTxInCache
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
 	reqRes, err := txmp.proxyAppConn.CheckTxAsync(ctx, abci.RequestCheckTx{Tx: tx})
 	if err != nil {
 		txmp.cache.Remove(tx)
