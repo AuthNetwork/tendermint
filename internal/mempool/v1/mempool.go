@@ -592,9 +592,17 @@ func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) 
 
 	// Scan for the transaction reported by the ABCI callback in the recheck list.
 	//
-	// TODO(creachadair): By construction this should always be the next
-	// element, unless that transaction was evicted. But in that case we should
-	// be skipping the _checked_ transaction rather than advancing the list.
+	// TODO(creachadair): By construction this should always be the next element
+	// unless either the ABCI call failed or the target transaction was evicted.
+	// In the first case, we should skip an item in the list, but but in the
+	// second we should be skipping the _checked_ transaction rather than
+	// advancing the list. Right now we don't have a way to tell.
+	//
+	// That means if a transaction is evicted before recheck reaches it, we will
+	// not filter any invalid transactions after that in the sequence, because
+	// this loop will scan to the end looking for it and then give up. We should
+	// distinguish the cases.
+	//
 	for {
 		if bytes.Equal(tx, wtx.tx) {
 			break // found
