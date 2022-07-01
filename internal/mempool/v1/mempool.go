@@ -590,14 +590,14 @@ func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) 
 	tx := req.GetCheckTx().Tx
 	wtx := txmp.recheckCursor.Value.(*WrappedTx)
 
-	// Search through the remaining list of tx to recheck for a transaction that matches
-	// the one we received from the ABCI application.
+	// Scan for the transaction reported by the ABCI callback in the recheck list.
+	//
+	// TODO(creachadair): By construction this should always be the next
+	// element, unless that transaction was evicted. But in that case we should
+	// be skipping the _checked_ transaction rather than advancing the list.
 	for {
 		if bytes.Equal(tx, wtx.tx) {
-			// We've found a tx in the recheck list that matches the tx that we
-			// received from the ABCI application.
-			// Break, and use this transaction for further checks.
-			break
+			break // found
 		}
 
 		txmp.logger.Error(
@@ -606,10 +606,8 @@ func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) 
 			"expected", types.Tx(tx).Key(),
 		)
 
+		// If the recheck list is empty, we're done here.
 		if txmp.recheckCursor == txmp.recheckEnd {
-			// we reached the end of the recheckTx list without finding a tx
-			// matching the one we received from the ABCI application.
-			// Return without processing any tx.
 			txmp.recheckCursor = nil
 			return
 		}
