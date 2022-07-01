@@ -21,9 +21,8 @@ type WrappedTx struct {
 	peers     map[uint16]bool // peer IDs who have sent us this transaction
 }
 
-func (wtx *WrappedTx) Size() int {
-	return len(wtx.tx)
-}
+// Size reports the size of the raw transaction in bytes.
+func (wtx *WrappedTx) Size() int { return len(wtx.tx) }
 
 // TxStore implements a thread-safe mapping of valid transaction(s).
 //

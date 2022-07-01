@@ -13,7 +13,6 @@ import (
 	abci "github.com/tendermint/tendermint/abci/types"
 	"github.com/tendermint/tendermint/config"
 	"github.com/tendermint/tendermint/internal/libs/clist"
-	tmsync "github.com/tendermint/tendermint/internal/libs/sync"
 	"github.com/tendermint/tendermint/internal/mempool"
 	"github.com/tendermint/tendermint/internal/proxy"
 	"github.com/tendermint/tendermint/libs/log"
@@ -36,40 +35,34 @@ type TxMempoolOption func(*TxMempool)
 // gossiped to the rest of the network based on that order (gossip order does
 // not take priority into account).
 type TxMempool struct {
+	// Immutable fields
+	logger       log.Logger
+	config       *config.MempoolConfig
+	proxyAppConn proxy.AppConnMempool
+	metrics      *mempool.Metrics
+	cache        mempool.TxCache // seen transactions
+
+	// Atomically-updated fields
 	height   int64 // atomic: the latest height passed to Update
 	txsBytes int64 // atomic: the total size of all transactions in the mempool, in bytes
 
-	// notify listeners (ie. consensus) when txs are available
-	notifiedTxsAvailable bool
-	txsAvailable         chan struct{} // fires once for each height, when the mempool is not empty
-
-	config *config.MempoolConfig
-
-	// Exclusive mutex for Update method to prevent concurrent execution of
-	// CheckTx or ReapMaxBytesMaxGas(ReapMaxTxs) methods.
-	updateMtx tmsync.RWMutex
-	preCheck  mempool.PreCheckFunc
-	postCheck mempool.PostCheckFunc
-
-	txs          *clist.CList // concurrent linked-list of good txs
-	proxyAppConn proxy.AppConnMempool
-
-	// Track whether we're rechecking txs.
-	// These are not protected by a mutex and are expected to be mutated in
-	// serial (ie. by abci responses which are called in serial).
+	// The beginning and end of the subrange of txs that needs to be rechecked
+	// after a block is committed (during the Update). Rechecks are processed in
+	// sequential order after the transactions from the previous block have been
+	// removed from the list.
 	recheckCursor *clist.CElement // next expected response
 	recheckEnd    *clist.CElement // re-checking stops here
 
-	// Map for quick access to txs to record sender in CheckTx.
-	// txsMap: txKey -> CElement
-	txsMap sync.Map
+	// Synchronized fields, protected by mtx.
+	mtx                  *sync.RWMutex
+	notifiedTxsAvailable bool
+	txsAvailable         chan struct{} // one value sent per height when mempool is not empty
+	preCheck             mempool.PreCheckFunc
+	postCheck            mempool.PostCheckFunc
 
-	// Keep a cache of already-seen txs.
-	// This reduces the pressure on the proxyApp.
-	cache mempool.TxCache
-
-	logger  log.Logger
-	metrics *mempool.Metrics
+	txs        *clist.CList // valid transactions (passed CheckTx)
+	txByKey    map[types.TxKey]*clist.CElement
+	txBySender map[string]*clist.CElement // for sender != ""
 }
 
 // NewTxMempool constructs a new, empty priority mempool at the specified
@@ -87,15 +80,14 @@ func NewTxMempool(
 		config:       cfg,
 		proxyAppConn: proxyAppConn,
 		height:       height,
-		cache:        mempool.NopTxCache{},
 		metrics:      mempool.NopMetrics(),
+		cache:        mempool.NopTxCache{},
 	}
-
 	if cfg.CacheSize > 0 {
 		txmp.cache = mempool.NewLRUTxCache(cfg.CacheSize)
 	}
 
-	proxyAppConn.SetResponseCallback(txmp.defaultTxCallback)
+	proxyAppConn.SetResponseCallback(txmp.recheckTxCallback)
 
 	for _, opt := range options {
 		opt(txmp)
@@ -573,15 +565,14 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 
 }
 
-// defaultTxCallback performs the default CheckTx application callback. This is
-// NOT executed when a transaction is first seen/received. Instead, this callback
-// is executed during re-checking transactions (if enabled). A caller, i.e a
-// block proposer, acquires a mempool write-lock via Lock() and when executing
-// Update(), if the mempool is non-empty and Recheck is enabled, then all
-// remaining transactions will be rechecked via CheckTxAsync. The order in which
-// they are rechecked must be the same order in which this callback is called
-// per transaction.
-func (txmp *TxMempool) defaultTxCallback(req *abci.Request, res *abci.Response) {
+// recheckTxCallback handles the responses from ABCI CheckTx calls issued
+// during the recheck phase of a block Update. It updates the recheck cursors
+// and removes any transactions invalidated by the application.
+//
+// This callback is NOT executed for the initial CheckTx on a new transaction;
+// that case is handled by initTxCallback instead.
+func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) {
+	// If we are not performing a recheck, ignore this response.
 	if txmp.recheckCursor == nil {
 		return
 	}
