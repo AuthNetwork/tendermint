@@ -258,7 +258,6 @@ func (txmp *TxMempool) removeTxByKey(key types.TxKey) error {
 		delete(txmp.txBySender, elt.Value.(*WrappedTx).sender)
 		txmp.txs.Remove(elt)
 		elt.DetachPrev()
-		elt.DetachNext()
 		return nil
 	}
 	return fmt.Errorf("transaction %x not found", key)
@@ -272,7 +271,6 @@ func (txmp *TxMempool) removeTxByElement(elt *clist.CElement) {
 	delete(txmp.txBySender, w.sender)
 	txmp.txs.Remove(elt)
 	elt.DetachPrev()
-	elt.DetachNext()
 }
 
 // Flush purges the contents of the mempool and the cache, leaving both empty.
@@ -438,6 +436,9 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 		return
 	}
 
+	txmp.mtx.Lock()
+	defer txmp.mtx.Unlock()
+
 	var err error
 	if txmp.postCheck != nil {
 		err = txmp.postCheck(wtx.tx, checkTxRes.CheckTx)
@@ -456,7 +457,7 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 		txmp.metrics.FailedTxs.Add(1)
 
 		// Remove the invalid transaction from the cache, unless the operator has
-		// instructed us to do otherwise.
+		// instructed us to keep invalid transactions.
 		if !txmp.config.KeepInvalidTxsInCache {
 			txmp.cache.Remove(wtx.tx)
 		}
@@ -469,23 +470,21 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 		return
 	}
 
-	// FIXME: Do we actually want this? The old mempool doesn't do it.  Inclined
-	// to leave it out without a good reason.
-	//
-	// 	sender := checkTxRes.CheckTx.Sender
-	// 	priority := checkTxRes.CheckTx.Priority
-	//
-	// 	if sender != "" {
-	// 		if wtx := txmp.txStore.GetTxBySender(sender); wtx != nil {
-	// 			txmp.logger.Error(
-	// 				"rejected incoming good transaction; tx already exists for sender",
-	// 				"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
-	// 				"sender", sender,
-	// 			)
-	// 			txmp.metrics.RejectedTxs.Add(1)
-	// 			return
-	// 		}
-	// 	}
+	// Disallow multiple concurrent transactions from the same sender assigned
+	// by the ABCI application. As a special case, an empty sender is not
+	// restricted.
+	if sender := checktxRes.CheckTx.Sender; sender != "" {
+		elt, ok := txmp.txBySender[sender]
+		if ok {
+			w := elt.Value.(*WrappedTx)
+			txmp.logger.Error(
+				"rejected valid incoming transaction; tx already exists for sender",
+				"tx", fmt.Sprintf("%X", w.tx.Hash()),
+				"sender", sender,
+			)
+			return
+		}
+	}
 
 	// At this point the application has ruled the transaction valid, but the
 	// mempool might be full. If so, find the lowest-priority item with lower
