@@ -349,15 +349,17 @@ func (txmp *TxMempool) ReapMaxTxs(max int) types.Txs {
 	return keep
 }
 
-// Update iterates over all the transactions provided by the caller, i.e. the
-// block producer, and removes them from the cache (if applicable) and removes
-// the transactions from the main transaction store and associated indexes.
-// Finally, if there are trainsactions remaining in the mempool, we initiate a
-// re-CheckTx for them (if applicable), otherwise, we notify the caller more
-// transactions are available.
+// Update removes all the given transactions from the mempool and the cache,
+// and updates the current block height. The blockTxs and deliverTxResponses
+// must have the same length with each response corresponding to the tx at the
+// same offset.
 //
-// NOTE:
-// - The caller must explicitly acquire a write-lock via Lock().
+// If the configuration enables recheck, Update sends each remaining
+// transaction after removing blockTxs to the ABCI CheckTx method.  Any
+// transactions marked as invalid during recheck are also removed.
+//
+// The caller must hold an exclusive mempool lock (by calling txmp.Lock) before
+// calling Update.
 func (txmp *TxMempool) Update(
 	blockHeight int64,
 	blockTxs types.Txs,
@@ -365,6 +367,16 @@ func (txmp *TxMempool) Update(
 	newPreFn mempool.PreCheckFunc,
 	newPostFn mempool.PostCheckFunc,
 ) error {
+	// Safety check: The caller is required to hold the lock.
+	if txmp.mtx.TryLock() {
+		txmp.mtx.Unlock()
+		panic("mempool: Update caller does not hold the lock")
+	}
+	// Safety check: Transactions and responses must match in number.
+	if len(blockTxs) != len(deliverTxResponses) {
+		panic(fmt.Sprintf("mempool: got %d transactions but %d DeliverTx responses",
+			len(blockTxs), len(deliverTxResponses)))
+	}
 
 	txmp.height = blockHeight
 	txmp.notifiedTxsAvailable = false
@@ -377,21 +389,21 @@ func (txmp *TxMempool) Update(
 	}
 
 	for i, tx := range blockTxs {
+		// Add successful committed transactions to the cache (if they are not
+		// already present).  Transactions that failed to commit are removed from
+		// the cache unless the operator has explicitly requested we keep them.
 		if deliverTxResponses[i].Code == abci.CodeTypeOK {
-			// add the valid committed transaction to the cache (if missing)
 			_ = txmp.cache.Push(tx)
 		} else if !txmp.config.KeepInvalidTxsInCache {
-			// allow invalid transactions to be re-submitted
 			txmp.cache.Remove(tx)
 		}
 
-		// remove the committed transaction from the transaction store and indexes
-		if wtx := txmp.txStore.GetTxByHash(tx.Key()); wtx != nil {
-			txmp.removeTx(wtx, false)
-		}
+		// Regardless of success, remove the transaction from the mempool.
+		_ = txmp.removeTxByKey(tx.Key())
 	}
 
-	txmp.purgeExpiredTxs(blockHeight)
+	// FIXME: implement this
+	//txmp.purgeExpiredTxs(blockHeight)
 
 	// If there any uncommitted transactions left in the mempool, we either
 	// initiate re-CheckTx per remaining transaction or notify that remaining
