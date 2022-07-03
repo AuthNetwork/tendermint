@@ -535,6 +535,17 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 			"new_priority", priority,
 		)
 
+		// Sort lowest priority items first so they will be evicted first.  Break
+		// ties in favor of newer items (to maintain FIFO semantics in a group).
+		sort.Slice(victims, func(i, j int) bool {
+			iw := victims[i].Value.(*WrappedTx)
+			jw := victims[j].Value.(*WrappedTx)
+			if iw.priority == jw.priority {
+				return iw.timestamp.After(jw.timestamp)
+			}
+			return iw.priority < jw.priority
+		})
+
 		// Evict as many of the victims as necessary to make room.
 		var evictedBytes int64
 		for _, vic := range victims {
