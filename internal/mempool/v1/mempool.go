@@ -3,7 +3,6 @@ package v1
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"reflect"
 	"sync"
@@ -242,16 +241,18 @@ func (txmp *TxMempool) CheckTx(
 }
 
 func (txmp *TxMempool) RemoveTxByKey(txKey types.TxKey) error {
-	txmp.Lock()
-	defer txmp.Unlock()
+	txmp.mtx.Lock()
+	defer txmp.mtx.Unlock()
 
-	// remove the committed transaction from the transaction store and indexes
-	if wtx := txmp.txStore.GetTxByHash(txKey); wtx != nil {
-		txmp.removeTx(wtx, false)
+	if elt, ok := txmp.txByKey[txKey]; ok {
+		delete(txmp.txByKey, txKey)
+		delete(txmp.txBySender, elt.Value.(*WrappedTx).sender)
+		clist.Remove(txmp.txs, elt)
+		elt.DetachPrev()
+		elt.DetachNext()
 		return nil
 	}
-
-	return errors.New("transaction not found")
+	return fmt.Errorf("transaction %x not found", txKey)
 }
 
 // Flush purges the contents of the mempool and the cache, leaving both empty.
