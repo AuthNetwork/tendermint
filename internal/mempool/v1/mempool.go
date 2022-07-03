@@ -270,14 +270,10 @@ func (txmp *TxMempool) Flush() {
 	txmp.cache.Reset()
 }
 
-// ReapMaxBytesMaxGas returns a slice of valid transactions that fit within the
-// size and gas constraints. The results are ordered by nonincreasing priority,
-// with ties broken by increasing order of arrival.  Reaping transactions does
-// not remove them from the mempool.
-//
-// If the mempool is empty or has no transactions fitting within the given
-// constraints, the result will also be empty.
-func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
+// allEntriesSorted returns a slice of all the transactions currently in the
+// mempool, sorted in nonincreasing order by priority with ties broken by
+// increasing order of arrival time.
+func (txmp *TxMempool) allEntriesSorted() []*WrappedTx {
 	txmp.mtx.RLock()
 	defer txmp.mtx.RUnlock()
 
@@ -291,11 +287,21 @@ func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
 		}
 		return all[i].priority > all[j].priority // N.B. higher priorities first
 	})
+	return all
+}
 
+// ReapMaxBytesMaxGas returns a slice of valid transactions that fit within the
+// size and gas constraints. The results are ordered by nonincreasing priority,
+// with ties broken by increasing order of arrival.  Reaping transactions does
+// not remove them from the mempool.
+//
+// If the mempool is empty or has no transactions fitting within the given
+// constraints, the result will also be empty.
+func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
 	var totalGas, totalBytes int64
 
 	var keep []types.Tx
-	for _, w := range all {
+	for _, w := range txmp.allEntriesSorted() {
 		totalGas += w.gasWanted
 		totalBytes += int64(len(w.tx))
 		if totalGas > maxGas || totalBytes > maxBytes {
