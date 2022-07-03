@@ -1,7 +1,6 @@
 package v1
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"reflect"
@@ -44,13 +43,6 @@ type TxMempool struct {
 	// Atomically-updated fields
 	height   int64 // atomic: the latest height passed to Update
 	txsBytes int64 // atomic: the total size of all transactions in the mempool, in bytes
-
-	// The beginning and end of the subrange of txs that needs to be rechecked
-	// after a block is committed (during the Update). Rechecks are processed in
-	// sequential order after the transactions from the previous block have been
-	// removed from the list.
-	recheckCursor *clist.CElement // next expected response
-	recheckEnd    *clist.CElement // re-checking stops here
 
 	// Synchronized fields, protected by mtx.
 	mtx                  *sync.RWMutex
@@ -222,19 +214,13 @@ func (txmp *TxMempool) CheckTx(
 	}
 
 	reqRes.SetCallback(func(res *abci.Response) {
-		if txmp.recheckCursor != nil {
-			panic("recheck cursor is non-nil in CheckTx callback")
-		}
-
-		wtx := &WrappedTx{
+		txmp.initTxCallback(&WrappedTx{
 			tx:        tx,
 			hash:      txKey,
 			timestamp: time.Now().UTC(),
 			height:    txmp.height,
 			peers:     map[uint16]bool{txInfo.SenderID: true},
-		}
-		txmp.initTxCallback(wtx, res)
-
+		}, res)
 		if cb != nil {
 			cb(res)
 		}
@@ -422,7 +408,7 @@ func (txmp *TxMempool) Update(
 	txmp.metrics.Size.Set(float64(size))
 	if size > 0 {
 		if txmp.config.Recheck {
-			txmp.updateRecheckCursors()
+			txmp.recheckTransactions()
 		} else {
 			txmp.notifyTxsAvailable()
 		}
@@ -600,110 +586,61 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response) {
 // This callback is NOT executed for the initial CheckTx on a new transaction;
 // that case is handled by initTxCallback instead.
 func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) {
-	// If we are not performing a recheck, ignore this response.
-	if txmp.recheckCursor == nil {
-		return
-	}
-
-	txmp.metrics.RecheckTimes.Add(1)
+	txmp.mtx.Lock()
+	defer txmp.mtx.Unlock()
 
 	checkTxRes, ok := res.Value.(*abci.Response_CheckTx)
 	if !ok {
-		txmp.logger.Error("received incorrect type in mempool callback",
+		txmp.logger.Error("mempool: received incorrect result type in CheckTx callback",
 			"expected", reflect.TypeOf(&abci.Response_CheckTx{}).Name(),
 			"got", reflect.TypeOf(res.Value).Name(),
 		)
 		return
 	}
-	tx := req.GetCheckTx().Tx
-	wtx := txmp.recheckCursor.Value.(*WrappedTx)
 
-	// Scan for the transaction reported by the ABCI callback in the recheck list.
-	//
-	// TODO(creachadair): By construction this should always be the next element
-	// unless either the ABCI call failed or the target transaction was evicted.
-	// In the first case, we should skip an item in the list, but but in the
-	// second we should be skipping the _checked_ transaction rather than
-	// advancing the list. Right now we don't have a way to tell.
-	//
-	// That means if a transaction is evicted before recheck reaches it, we will
-	// not filter any invalid transactions after that in the sequence, because
-	// this loop will scan to the end looking for it and then give up. We should
-	// distinguish the cases.
-	//
-	for {
-		if bytes.Equal(tx, wtx.tx) {
-			break // found
-		}
+	txmp.metrics.RecheckTimes.Add(1)
+	tx := types.Tx(req.GetCheckTx().Tx)
 
-		txmp.logger.Error(
-			"re-CheckTx transaction mismatch",
-			"got", wtx.tx.Hash(),
-			"expected", types.Tx(tx).Key(),
-		)
+	// Find the transaction reported by the ABCI callback. It is possible the
+	// transaction was evicted during the recheck, in which case the transaction
+	// will be gone.
+	elt, ok := txmp.txByKey[tx.Key()]
+	if !ok {
+		return
+	}
+	wtx := elt.Value.(*WrappedTx)
 
-		// If the recheck list is empty, we're done here.
-		if txmp.recheckCursor == txmp.recheckEnd {
-			txmp.recheckCursor = nil
-			return
-		}
-
-		txmp.recheckCursor = txmp.recheckCursor.Next()
-		wtx = txmp.recheckCursor.Value.(*WrappedTx)
+	// If a postcheck hook is defined, call it before checking the result.
+	var err error
+	if txmp.postCheck != nil {
+		err = txmp.postCheck(tx, checkTxRes.CheckTx)
 	}
 
-	// Only evaluate transactions that have not been removed. This can happen
-	// if an existing transaction is evicted during CheckTx and while this
-	// callback is being executed for the same evicted transaction.
-	if !txmp.txStore.IsTxRemoved(wtx.hash) {
-		var err error
-		if txmp.postCheck != nil {
-			err = txmp.postCheck(tx, checkTxRes.CheckTx)
-		}
-
-		if checkTxRes.CheckTx.Code == abci.CodeTypeOK && err == nil {
-			wtx.priority = checkTxRes.CheckTx.Priority
-		} else {
-			txmp.logger.Debug(
-				"existing transaction no longer valid; failed re-CheckTx callback",
-				"priority", wtx.priority,
-				"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
-				"err", err,
-				"code", checkTxRes.CheckTx.Code,
-			)
-
-			if wtx.gossipEl != txmp.recheckCursor {
-				panic("corrupted reCheckTx cursor")
-			}
-
-			txmp.removeTx(wtx, !txmp.config.KeepInvalidTxsInCache)
-		}
+	if checkTxRes.CheckTx.Code == abci.CodeTypeOK && err == nil {
+		wtx.priority = checkTxRes.CheckTx.Priority
+		return // N.B. Size of mempool did not change
 	}
 
-	// move reCheckTx cursor to next element
-	if txmp.recheckCursor == txmp.recheckEnd {
-		txmp.recheckCursor = nil
-	} else {
-		txmp.recheckCursor = txmp.recheckCursor.Next()
+	txmp.logger.Debug(
+		"existing transaction no longer valid; failed re-CheckTx callback",
+		"priority", wtx.priority,
+		"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
+		"err", err,
+		"code", checkTxRes.CheckTx.Code,
+	)
+	txmp.removeTxByElement(elt)
+	if !txmp.config.KeepInvalidTxsInCache {
+		txmp.cache.Remove(wtx.tx)
 	}
-
-	if txmp.recheckCursor == nil {
-		txmp.logger.Debug("finished rechecking transactions")
-
-		if txmp.Size() > 0 {
-			txmp.notifyTxsAvailable()
-		}
-	}
-
 	txmp.metrics.Size.Set(float64(txmp.Size()))
 }
 
-// updateRecheckCursors updates the recheck cursors and initiates re-CheckTx
-// ABCI calls for all the transactions in the mempool.
+// recheckTransactions initiates re-CheckTx ABCI calls for all the transactions
+// currently in the mempool.
 //
 // Precondition: The mempool is not empty.
 // The caller must hold txmp.mtx exclusively.
-func (txmp *TxMempool) updateRecheckCursors() {
+func (txmp *TxMempool) recheckTransactions() {
 	if txmp.Size() == 0 {
 		panic("mempool: cannot update recheck cursors on an empty mempool")
 	}
@@ -713,10 +650,7 @@ func (txmp *TxMempool) updateRecheckCursors() {
 		"height", txmp.height,
 	)
 
-	txmp.recheckCursor = txmp.txs.Front()
-	txmp.recheckEnd = txmp.txs.Back()
 	ctx := context.TODO()
-
 	for e := txmp.txs.Front(); e != nil; e = e.Next() {
 		wtx := e.Value.(*WrappedTx)
 
@@ -740,40 +674,18 @@ func (txmp *TxMempool) updateRecheckCursors() {
 // returned and the transaction can be inserted into the mempool.
 func (txmp *TxMempool) canAddTx(wtx *WrappedTx) error {
 	numTxs := txmp.Size()
-	txBytes := txmp.SizeByte()
+	txBytes := txmp.SizeBytes()
 
-	if numTxs >= txmp.config.Size || int64(wtx.Size())+sizeBytes > txmp.config.MaxTxsBytes {
+	if numTxs >= txmp.config.Size || wtx.Size()+txBytes > txmp.config.MaxTxsBytes {
 		return types.ErrMempoolIsFull{
 			NumTxs:      numTxs,
 			MaxTxs:      txmp.config.Size,
-			TxsBytes:    sizeBytes,
+			TxsBytes:    txBytes,
 			MaxTxsBytes: txmp.config.MaxTxsBytes,
 		}
 	}
 
 	return nil
-}
-
-func (txmp *TxMempool) removeTx(wtx *WrappedTx, removeFromCache bool) {
-	if txmp.txStore.IsTxRemoved(wtx.hash) {
-		return
-	}
-
-	txmp.txStore.RemoveTx(wtx)
-	txmp.priorityIndex.RemoveTx(wtx)
-	txmp.heightIndex.Remove(wtx)
-	txmp.timestampIndex.Remove(wtx)
-
-	// Remove the transaction from the gossip index and cleanup the linked-list
-	// element so it can be garbage collected.
-	txmp.gossipIndex.Remove(wtx.gossipEl)
-	wtx.gossipEl.DetachPrev()
-
-	atomic.AddInt64(&txmp.sizeBytes, int64(-wtx.Size()))
-
-	if removeFromCache {
-		txmp.cache.Remove(wtx.tx)
-	}
 }
 
 // purgeExpiredTxs removes all transactions from the mempool that have exceeded
