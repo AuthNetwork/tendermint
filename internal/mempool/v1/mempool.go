@@ -280,11 +280,13 @@ func (txmp *TxMempool) Flush() {
 	defer txmp.mtx.Unlock()
 
 	atomic.SwapInt64(&txmp.txsBytes, 0)
-	// FIXME: update recheck cursors?
 	txmp.txs = nil
 	txmp.txByKey = make(map[types.TxKey]*clist.CElement)
 	txmp.txBySender = make(map[string]*clist.CElement)
 	txmp.cache.Reset()
+
+	// N.B. Flushing does not update the recheck cursors, so that pending
+	// rechecks can still complete.
 }
 
 // allEntriesSorted returns a slice of all the transactions currently in the
