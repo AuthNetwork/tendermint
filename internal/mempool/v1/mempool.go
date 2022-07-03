@@ -81,6 +81,7 @@ func NewTxMempool(
 		height:       height,
 		metrics:      mempool.NopMetrics(),
 		cache:        mempool.NopTxCache{},
+		txs:          clist.New(),
 		txByKey:      make(map[types.TxKey]*clist.CElement),
 		txBySender:   make(map[string]*clist.CElement),
 	}
@@ -280,7 +281,7 @@ func (txmp *TxMempool) Flush() {
 	defer txmp.mtx.Unlock()
 
 	atomic.SwapInt64(&txmp.txsBytes, 0)
-	txmp.txs = nil
+	txmp.txs = clist.New()
 	txmp.txByKey = make(map[types.TxKey]*clist.CElement)
 	txmp.txBySender = make(map[string]*clist.CElement)
 	txmp.cache.Reset()
