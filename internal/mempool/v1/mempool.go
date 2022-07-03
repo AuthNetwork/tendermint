@@ -417,15 +417,15 @@ func (txmp *TxMempool) Update(
 	// If there any uncommitted transactions left in the mempool, we either
 	// initiate re-CheckTx per remaining transaction or notify that remaining
 	// transactions are left.
-	if txmp.Size() > 0 {
+	size := txmp.Size()
+	txmp.metrics.Size.Set(float64(size))
+	if size > 0 {
 		if txmp.config.Recheck {
 			txmp.updateRecheckCursors()
 		} else {
 			txmp.notifyTxsAvailable()
 		}
 	}
-
-	txmp.metrics.Size.Set(float64(txmp.Size()))
 	return nil
 }
 
