@@ -125,11 +125,11 @@ func (txmp *TxMempool) Unlock() { txmp.mtx.Unlock() }
 
 // Size returns the number of valid transactions in the mempool. It is
 // thread-safe.
-func (txmp *TxMempool) Size() int { return txmp.txs.Size() }
+func (txmp *TxMempool) Size() int { return txmp.txs.Len() }
 
 // SizeBytes return the total sum in bytes of all the valid transactions in the
 // mempool. It is thread-safe.
-func (txmp *TxMempool) SizeBytes() int64 { return atomic.LoadInt64(&txmp.sizeBytes) }
+func (txmp *TxMempool) SizeBytes() int64 { return atomic.LoadInt64(&txmp.txsBytes) }
 
 // FlushAppConn executes FlushSync on the mempool's proxyAppConn.
 //
@@ -205,8 +205,9 @@ func (txmp *TxMempool) CheckTx(
 	// Check for the transaction in the cache.
 	if !txmp.cache.Push(tx) {
 		// If the cached transaction is also in the pool, record its sender.
-		if w, ok := txmp.txbyKey[txKey]; ok {
-			w.senders[txInfo.SenderId] = true // FIXME: synchronize
+		if elt, ok := txmp.txByKey[txKey]; ok {
+			w := elt.Value.(*WrappedTx)
+			w.peers[txInfo.SenderID] = true // FIXME: synchronize
 		}
 		return types.ErrTxInCache
 	}
@@ -215,7 +216,7 @@ func (txmp *TxMempool) CheckTx(
 	// responsible for adding the transaction to the pool if it survives.
 	reqRes, err := txmp.proxyAppConn.CheckTxAsync(ctx, abci.RequestCheckTx{Tx: tx})
 	if err != nil {
-		txmp.cache.Delete(txKey)
+		txmp.cache.Remove(tx)
 		return err
 	}
 
@@ -226,7 +227,7 @@ func (txmp *TxMempool) CheckTx(
 
 		wtx := &WrappedTx{
 			tx:        tx,
-			hash:      txHash,
+			hash:      txKey,
 			timestamp: time.Now().UTC(),
 			height:    txmp.height,
 		}
@@ -247,7 +248,7 @@ func (txmp *TxMempool) RemoveTxByKey(txKey types.TxKey) error {
 	if elt, ok := txmp.txByKey[txKey]; ok {
 		delete(txmp.txByKey, txKey)
 		delete(txmp.txBySender, elt.Value.(*WrappedTx).sender)
-		clist.Remove(txmp.txs, elt)
+		txmp.txs.Remove(elt)
 		elt.DetachPrev()
 		elt.DetachNext()
 		return nil
