@@ -22,7 +22,7 @@ type WrappedTx struct {
 }
 
 // Size reports the size of the raw transaction in bytes.
-func (wtx *WrappedTx) Size() int { return len(wtx.tx) }
+func (wtx *WrappedTx) Size() int64 { return int64(len(wtx.tx)) }
 
 // TxStore implements a thread-safe mapping of valid transaction(s).
 //
