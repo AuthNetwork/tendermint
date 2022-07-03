@@ -82,6 +82,8 @@ func NewTxMempool(
 		height:       height,
 		metrics:      mempool.NopMetrics(),
 		cache:        mempool.NopTxCache{},
+		txByKey:      make(map[types.TxKey]*clist.CElement),
+		txBySender:   make(map[string]*clist.CElement),
 	}
 	if cfg.CacheSize > 0 {
 		txmp.cache = mempool.NewLRUTxCache(cfg.CacheSize)
@@ -176,8 +178,9 @@ func (txmp *TxMempool) CheckTx(
 	txInfo mempool.TxInfo,
 ) error {
 
-	// N.B. We acquire a reader lock here only to exclude checks from happening
-	// concurrently with modifications (e.g., evictions). This
+	// During the initial phase of CheckTx, we do not need to modify any state.
+	// A transaction will not actually be added to the mempool until it survives
+	// a call to the ABCI CheckTx method and size constraint checks.
 	txmp.mtx.RLock()
 	defer txmp.mtx.RUnlock()
 
@@ -193,33 +196,27 @@ func (txmp *TxMempool) CheckTx(
 		}
 	}
 
+	// Early exit if the proxy connection has an error.
+	if err := txmp.proxyAppConn.Error(); err != nil {
+		return err
+	}
+
 	txKey := tx.Key()
 
 	// Check for the transaction in the cache.
 	if !txmp.cache.Push(tx) {
 		// If the cached transaction is also in the pool, record its sender.
-		if e, ok := txmp.txMap.Load(txKey); ok {
-			w := e.(*clist.CElement).Value.(*WrappedTx)
-			w.senders[txInfo.SenderID] = true // FIXME: synchronize
+		if w, ok := txmp.txbyKey[txKey]; ok {
+			w.senders[txInfo.SenderId] = true // FIXME: synchronize
 		}
 		return types.ErrTxInCache
 	}
 
-	if err := txmp.proxyAppConn.Error(); err != nil {
-		return err
-	}
-
-	// We add the transaction to the mempool's cache and if the
-	// transaction is already present in the cache, i.e. false is returned, then we
-	// check if we've seen this transaction and error if we have.
-	if !txmp.cache.Push(tx) {
-		txmp.txStore.GetOrSetPeerByTxHash(txHash, txInfo.SenderID)
-		return types.ErrTxInCache
-	}
-
+	// Initiate an ABCI CheckTx for this transaction. The callback is
+	// responsible for adding the transaction to the pool if it survives.
 	reqRes, err := txmp.proxyAppConn.CheckTxAsync(ctx, abci.RequestCheckTx{Tx: tx})
 	if err != nil {
-		txmp.cache.Remove(tx)
+		txmp.cache.Delete(txKey)
 		return err
 	}
 
