@@ -308,9 +308,6 @@ func (r *Reactor) processPeerUpdates() {
 }
 
 func (r *Reactor) broadcastTxRoutine(peerID types.NodeID, closer *tmsync.Closer) {
-	peerMempoolID := r.ids.GetForPeer(peerID)
-	var nextGossipTx *clist.CElement
-
 	// remove the peer ID from the map of routines and mark the waitgroup as done
 	defer func() {
 		r.mtx.Lock()
@@ -329,6 +326,8 @@ func (r *Reactor) broadcastTxRoutine(peerID types.NodeID, closer *tmsync.Closer)
 		}
 	}()
 
+	peerMempoolID := r.ids.GetForPeer(peerID)
+	var nextGossipTx *clist.CElement
 	for {
 		if !r.IsRunning() {
 			return
