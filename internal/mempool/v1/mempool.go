@@ -231,8 +231,9 @@ func (txmp *TxMempool) CheckTx(
 			hash:      txKey,
 			timestamp: time.Now().UTC(),
 			height:    txmp.height,
+			peers:     map[uint16]bool{txInfo.SenderID: true},
 		}
-		txmp.initTxCallback(wtx, res, txInfo)
+		txmp.initTxCallback(wtx, res)
 
 		if cb != nil {
 			cb(res)
@@ -442,7 +443,7 @@ func (txmp *TxMempool) Update(
 // transaction is evicted.
 //
 // Finally, the new transaction is added and size stats updated.
-func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo mempool.TxInfo) {
+func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response) {
 	checkTxRes, ok := res.Value.(*abci.Response_CheckTx)
 	if !ok {
 		return
@@ -461,7 +462,7 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 			"rejected bad transaction",
 			"priority", wtx.priority,
 			"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
-			"peer_id", txInfo.SenderNodeID,
+			"peer_id", wtx.peers,
 			"code", checkTxRes.CheckTx.Code,
 			"post_check_err", err,
 		)
@@ -571,21 +572,25 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 	wtx.gasWanted = checkTxRes.CheckTx.GasWanted
 	wtx.priority = priority
 	wtx.sender = sender
-	wtx.peers = map[uint16]bool{txInfo.SenderID: true}
 
 	txmp.metrics.TxSizeBytes.Observe(float64(wtx.Size()))
 	txmp.metrics.Size.Set(float64(txmp.Size()))
 
-	txmp.insertTx(wtx)
+	elt := txmp.txs.PushBack(wtx)
+	txmp.txByKey[wtx.tx.Key()] = elt
+	if wtx.sender != "" {
+		txmp.txBySender[wtx.sender] = elt
+	}
+
+	atomic.AddInt64(&txmp.txsBytes, wtx.Size())
 	txmp.logger.Debug(
-		"inserted good transaction",
+		"inserted new valid transaction",
 		"priority", wtx.priority,
 		"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
 		"height", txmp.height,
 		"num_txs", txmp.Size(),
 	)
 	txmp.notifyTxsAvailable()
-
 }
 
 // recheckTxCallback handles the responses from ABCI CheckTx calls issued
@@ -747,15 +752,6 @@ func (txmp *TxMempool) canAddTx(wtx *WrappedTx) error {
 	}
 
 	return nil
-}
-
-func (txmp *TxMempool) insertTx(wtx *WrappedTx) {
-	elt := txmp.txs.PushBack(wtx)
-	txmp.txByKey[wtx.tx.Key()] = elt
-	if wtx.sender != "" {
-		txmp.txBySender[wtx.sender] = elt
-	}
-	atomic.AddInt64(&txmp.txsBytes, wtx.Size())
 }
 
 func (txmp *TxMempool) removeTx(wtx *WrappedTx, removeFromCache bool) {
