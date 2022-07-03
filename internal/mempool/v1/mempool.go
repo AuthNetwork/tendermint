@@ -409,12 +409,7 @@ func (txmp *TxMempool) Update(
 	// transactions are left.
 	if txmp.Size() > 0 {
 		if txmp.config.Recheck {
-			txmp.logger.Debug(
-				"executing re-CheckTx for all remaining transactions",
-				"num_txs", txmp.Size(),
-				"height", blockHeight,
-			)
-			txmp.updateReCheckTxs()
+			txmp.updateRecheckCursors()
 		} else {
 			txmp.notifyTxsAvailable()
 		}
@@ -663,41 +658,40 @@ func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) 
 	txmp.metrics.Size.Set(float64(txmp.Size()))
 }
 
-// updateReCheckTxs updates the recheck cursors by using the gossipIndex. For
-// each transaction, it executes CheckTxAsync. The global callback defined on
-// the proxyAppConn will be executed for each transaction after CheckTx is
-// executed.
+// updateRecheckCursors updates the recheck cursors and initiates re-CheckTx
+// ABCI calls for all the transactions in the mempool.
 //
-// NOTE:
-// - The caller must have a write-lock when executing updateReCheckTxs.
+// Precondition: The mempool is not empty.
+// The caller must hold txmp.mtx exclusively.
 func (txmp *TxMempool) updateReCheckTxs() {
 	if txmp.Size() == 0 {
-		panic("attempted to update re-CheckTx txs when mempool is empty")
+		panic("mempool: cannot update recheck cursors on an empty mempool")
 	}
+	txmp.logger.Debug(
+		"executing re-CheckTx for all remaining transactions",
+		"num_txs", txmp.Size(),
+		"height", txmp.height,
+	)
 
-	txmp.recheckCursor = txmp.gossipIndex.Front()
-	txmp.recheckEnd = txmp.gossipIndex.Back()
-	ctx := context.Background()
+	txmp.recheckCursor = txmp.txs.Front()
+	txmp.recheckEnd = txmp.txs.Back()
+	ctx := context.TODO()
 
-	for e := txmp.gossipIndex.Front(); e != nil; e = e.Next() {
+	for e := txmp.txs.Front(); e != nil; e = e.Next() {
 		wtx := e.Value.(*WrappedTx)
 
-		// Only execute CheckTx if the transaction is not marked as removed which
-		// could happen if the transaction was evicted.
-		if !txmp.txStore.IsTxRemoved(wtx.hash) {
-			_, err := txmp.proxyAppConn.CheckTxAsync(ctx, abci.RequestCheckTx{
-				Tx:   wtx.tx,
-				Type: abci.CheckTxType_Recheck,
-			})
-			if err != nil {
-				// no need in retrying since the tx will be rechecked after the next block
-				txmp.logger.Error("failed to execute CheckTx during rechecking", "err", err)
-			}
+		_, err := txmp.proxyAppConn.CheckTxAsync(ctx, abci.RequestCheckTx{
+			Tx:   wtx.tx,
+			Type: abci.CheckTxType_Recheck,
+		})
+		if err != nil {
+			txmp.logger.Error("failed to execute CheckTx during recheck",
+				"err", err, "hash", fmt.Sprintf("%x", wtx.tx.Hash()))
 		}
 	}
 
 	if _, err := txmp.proxyAppConn.FlushAsync(ctx); err != nil {
-		txmp.logger.Error("failed to flush transactions during rechecking", "err", err)
+		txmp.logger.Error("failed to flush transactions during recheck", "err", err)
 	}
 }
 
