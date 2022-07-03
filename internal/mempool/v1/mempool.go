@@ -254,24 +254,17 @@ func (txmp *TxMempool) RemoveTxByKey(txKey types.TxKey) error {
 	return errors.New("transaction not found")
 }
 
-// Flush flushes out the mempool. It acquires a read-lock, fetches all the
-// transactions currently in the transaction store and removes each transaction
-// from the store and all indexes and finally resets the cache.
-//
-// NOTE:
-// - Flushing the mempool may leave the mempool in an inconsistent state.
+// Flush purges the contents of the mempool and the cache, leaving both empty.
+// The current height is not modified by this operation.
 func (txmp *TxMempool) Flush() {
-	txmp.mtx.RLock()
-	defer txmp.mtx.RUnlock()
+	txmp.mtx.Lock()
+	defer txmp.mtx.Unlock()
 
-	txmp.heightIndex.Reset()
-	txmp.timestampIndex.Reset()
-
-	for _, wtx := range txmp.txStore.GetAllTxs() {
-		txmp.removeTx(wtx, false)
-	}
-
-	atomic.SwapInt64(&txmp.sizeBytes, 0)
+	atomic.SwapInt64(&txmp.txsBytes, 0)
+	// FIXME: update recheck cursors?
+	txmp.txs = nil
+	txmp.txByKey = make(map[types.TxKey]*clist.CElement)
+	txmp.txBySender = make(map[string]*clist.CElement)
 	txmp.cache.Reset()
 }
 
