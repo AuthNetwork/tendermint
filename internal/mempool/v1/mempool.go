@@ -200,7 +200,7 @@ func (txmp *TxMempool) CheckTx(
 		// If the cached transaction is also in the pool, record its sender.
 		if elt, ok := txmp.txByKey[txKey]; ok {
 			w := elt.Value.(*WrappedTx)
-			w.peers[txInfo.SenderID] = true // FIXME: synchronize
+			w.SetPeer(txInfo.SenderID)
 		}
 		return types.ErrTxInCache
 	}
@@ -214,13 +214,14 @@ func (txmp *TxMempool) CheckTx(
 	}
 
 	reqRes.SetCallback(func(res *abci.Response) {
-		txmp.initTxCallback(&WrappedTx{
+		wtx := &WrappedTx{
 			tx:        tx,
 			hash:      txKey,
 			timestamp: time.Now().UTC(),
 			height:    txmp.height,
-			peers:     map[uint16]bool{txInfo.SenderID: true},
-		}, res)
+		}
+		wtx.SetPeer(txInfo.SenderID)
+		txmp.initTxCallback(wtx, res)
 		if cb != nil {
 			cb(res)
 		}
@@ -446,7 +447,7 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response) {
 	if err != nil || checkTxRes.CheckTx.Code != abci.CodeTypeOK {
 		txmp.logger.Info(
 			"rejected bad transaction",
-			"priority", wtx.priority,
+			"priority", wtx.Priority(),
 			"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
 			"peer_id", wtx.peers,
 			"code", checkTxRes.CheckTx.Code,
@@ -527,10 +528,10 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response) {
 		sort.Slice(victims, func(i, j int) bool {
 			iw := victims[i].Value.(*WrappedTx)
 			jw := victims[j].Value.(*WrappedTx)
-			if iw.priority == jw.priority {
+			if iw.Priority() == jw.Priority() {
 				return iw.timestamp.After(jw.timestamp)
 			}
-			return iw.priority < jw.priority
+			return iw.Priority() < jw.Priority()
 		})
 
 		// Evict as many of the victims as necessary to make room.
@@ -555,23 +556,23 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response) {
 		}
 	}
 
-	wtx.gasWanted = checkTxRes.CheckTx.GasWanted
-	wtx.priority = priority
-	wtx.sender = sender
+	wtx.SetGasWanted(checkTxRes.CheckTx.GasWanted)
+	wtx.SetPriority(priority)
+	wtx.SetSender(sender)
 
 	txmp.metrics.TxSizeBytes.Observe(float64(wtx.Size()))
 	txmp.metrics.Size.Set(float64(txmp.Size()))
 
 	elt := txmp.txs.PushBack(wtx)
 	txmp.txByKey[wtx.tx.Key()] = elt
-	if wtx.sender != "" {
-		txmp.txBySender[wtx.sender] = elt
+	if s := wtx.Sender(); s != "" {
+		txmp.txBySender[s] = elt
 	}
 
 	atomic.AddInt64(&txmp.txsBytes, wtx.Size())
 	txmp.logger.Debug(
 		"inserted new valid transaction",
-		"priority", wtx.priority,
+		"priority", wtx.Priority(),
 		"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
 		"height", txmp.height,
 		"num_txs", txmp.Size(),
@@ -617,13 +618,13 @@ func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) 
 	}
 
 	if checkTxRes.CheckTx.Code == abci.CodeTypeOK && err == nil {
-		wtx.priority = checkTxRes.CheckTx.Priority
+		wtx.SetPriority(checkTxRes.CheckTx.Priority)
 		return // N.B. Size of mempool did not change
 	}
 
 	txmp.logger.Debug(
 		"existing transaction no longer valid; failed re-CheckTx callback",
-		"priority", wtx.priority,
+		"priority", wtx.Priority(),
 		"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
 		"err", err,
 		"code", checkTxRes.CheckTx.Code,
