@@ -16,7 +16,6 @@ import (
 	"github.com/tendermint/tendermint/internal/mempool"
 	"github.com/tendermint/tendermint/internal/proxy"
 	"github.com/tendermint/tendermint/libs/log"
-	tmmath "github.com/tendermint/tendermint/libs/math"
 	"github.com/tendermint/tendermint/types"
 )
 
@@ -312,41 +311,22 @@ func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
 	return keep
 }
 
-// ReapMaxTxs returns a list of transactions within the provided number of
-// transactions bound. Transaction are retrieved in priority order.
+// ReapMaxTxs returns up to max transactions from the mempool. The results are
+// ordered by nonincreasing priority with ties broken by increasing order of
+// arrival. Reaping transactions does not remove them from the mempool.
 //
-// NOTE:
-// - A read-lock is acquired.
-// - Transactions returned are not actually removed from the mempool transaction
-//   store or indexes.
+// The result may have fewer than max elements (possibly zero) if the mempool
+// does not have that many transactions available.
 func (txmp *TxMempool) ReapMaxTxs(max int) types.Txs {
-	txmp.mtx.RLock()
-	defer txmp.mtx.RUnlock()
+	var keep []types.Tx
 
-	numTxs := txmp.priorityIndex.NumTxs()
-	if max < 0 {
-		max = numTxs
-	}
-
-	cap := tmmath.MinInt(numTxs, max)
-
-	// wTxs contains a list of *WrappedTx retrieved from the priority queue that
-	// need to be re-enqueued prior to returning.
-	wTxs := make([]*WrappedTx, 0, cap)
-	defer func() {
-		for _, wtx := range wTxs {
-			txmp.priorityIndex.PushTx(wtx)
+	for _, w := range txmp.allEntriesSorted() {
+		if len(keep) >= max {
+			break
 		}
-	}()
-
-	txs := make([]types.Tx, 0, cap)
-	for txmp.priorityIndex.NumTxs() > 0 && len(txs) < max {
-		wtx := txmp.priorityIndex.PopTx()
-		txs = append(txs, wtx.tx)
-		wTxs = append(wTxs, wtx)
+		keep = append(keep, w.tx)
 	}
-
-	return txs
+	return keep
 }
 
 // Update iterates over all the transactions provided by the caller, i.e. the
