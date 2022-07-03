@@ -276,7 +276,7 @@ func (txmp *TxMempool) removeTxByElement(elt *clist.CElement) {
 	txmp.txs.Remove(elt)
 	elt.DetachPrev()
 	elt.DetachNext()
-	atomic.AddInt64(&txmp.txsbytes, -int64(len(w.tx)))
+	atomic.AddInt64(&txmp.txsBytes, -w.Size())
 }
 
 // Flush purges the contents of the mempool and the cache, leaving both empty.
@@ -332,7 +332,7 @@ func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
 	var keep []types.Tx
 	for _, w := range txmp.allEntriesSorted() {
 		totalGas += w.gasWanted
-		totalBytes += int64(len(w.tx))
+		totalBytes += w.Size()
 		if totalGas > maxGas || totalBytes > maxBytes {
 			break
 		}
@@ -482,10 +482,13 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 		return
 	}
 
+	priority := checkTxRes.CheckTx.Priority
+	sender := checkTxRes.CheckTx.Sender
+
 	// Disallow multiple concurrent transactions from the same sender assigned
 	// by the ABCI application. As a special case, an empty sender is not
 	// restricted.
-	if sender := checktxRes.CheckTx.Sender; sender != "" {
+	if sender != "" {
 		elt, ok := txmp.txBySender[sender]
 		if ok {
 			w := elt.Value.(*WrappedTx)
@@ -504,19 +507,22 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 	// favor of tx. If no such item exists, we discard tx.
 
 	if err := txmp.canAddTx(wtx); err != nil {
+		var victims []*clist.CElement // eligible transactions for eviction
+		var victimBytes int64         // total size of victims
+		for cur := txmp.txs.Front(); cur != nil; cur = cur.Next() {
+			cw := cur.Value.(*WrappedTx)
+			if cw.priority < priority {
+				victims = append(victims, cur)
+			}
+		}
 
-		evictTxs := txmp.priorityIndex.GetEvictableTxs(
-			priority,
-			int64(wtx.Size()),
-			txmp.SizeBytes(),
-			txmp.config.MaxTxsBytes,
-		)
-		if len(evictTxs) == 0 {
-			// No room for the new incoming transaction so we just remove it from
-			// the cache.
+		// If there are no suitable eviction candidates, or the total size of
+		// those candidates is not enough to make room for the new transaction,
+		// drop the new one.
+		if len(victims) == 0 || victimBytes < wtx.Size() {
 			txmp.cache.Remove(wtx.tx)
 			txmp.logger.Error(
-				"rejected incoming good transaction; mempool full",
+				"rejected valid incoming transaction; mempool is full",
 				"tx", fmt.Sprintf("%X", wtx.tx.Hash()),
 				"err", err.Error(),
 			)
@@ -524,30 +530,37 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response, txInfo
 			return
 		}
 
-		// evict an existing transaction(s)
-		//
-		// NOTE:
-		// - The transaction, toEvict, can be removed while a concurrent
-		//   reCheckTx callback is being executed for the same transaction.
-		for _, toEvict := range evictTxs {
-			txmp.removeTx(toEvict, true)
+		txmp.logger.Debug("evicting lower-priority transactions",
+			"new_tx", fmt.Sprintf("%X", wtx.tx.Hash()),
+			"new_priority", priority,
+		)
+
+		// Evict as many of the victims as necessary to make room.
+		var evictedBytes int64
+		for _, vic := range victims {
+			w := vic.Value.(*WrappedTx)
+
 			txmp.logger.Debug(
-				"evicted existing good transaction; mempool full",
-				"old_tx", fmt.Sprintf("%X", toEvict.tx.Hash()),
-				"old_priority", toEvict.priority,
-				"new_tx", fmt.Sprintf("%X", wtx.tx.Hash()),
-				"new_priority", wtx.priority,
+				"evicted valid existing transaction; mempool full",
+				"old_tx", fmt.Sprintf("%X", w.tx.Hash()),
+				"old_priority", w.priority,
 			)
+			txmp.removeTxByElement(vic)
 			txmp.metrics.EvictedTxs.Add(1)
+
+			// We may not need to evict all the eligible transactions.  Bail out
+			// early if we have made enough room.
+			evictedBytes += w.Size()
+			if evictedBytes >= wtx.Size() {
+				break
+			}
 		}
 	}
 
 	wtx.gasWanted = checkTxRes.CheckTx.GasWanted
 	wtx.priority = priority
 	wtx.sender = sender
-	wtx.peers = map[uint16]struct{}{
-		txInfo.SenderID: {},
-	}
+	wtx.peers = map[uint16]bool{txInfo.SenderID: true}
 
 	txmp.metrics.TxSizeBytes.Observe(float64(wtx.Size()))
 	txmp.metrics.Size.Set(float64(txmp.Size()))
@@ -674,7 +687,7 @@ func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) 
 //
 // Precondition: The mempool is not empty.
 // The caller must hold txmp.mtx exclusively.
-func (txmp *TxMempool) updateReCheckTxs() {
+func (txmp *TxMempool) updateRecheckCursors() {
 	if txmp.Size() == 0 {
 		panic("mempool: cannot update recheck cursors on an empty mempool")
 	}
@@ -710,10 +723,8 @@ func (txmp *TxMempool) updateReCheckTxs() {
 // the mempool due to mempool configured constraints. Otherwise, nil is
 // returned and the transaction can be inserted into the mempool.
 func (txmp *TxMempool) canAddTx(wtx *WrappedTx) error {
-	var (
-		numTxs    = txmp.Size()
-		sizeBytes = txmp.SizeBytes()
-	)
+	numTxs := txmp.Size()
+	txBytes := txmp.SizeByte()
 
 	if numTxs >= txmp.config.Size || int64(wtx.Size())+sizeBytes > txmp.config.MaxTxsBytes {
 		return types.ErrMempoolIsFull{
@@ -728,18 +739,12 @@ func (txmp *TxMempool) canAddTx(wtx *WrappedTx) error {
 }
 
 func (txmp *TxMempool) insertTx(wtx *WrappedTx) {
-	txmp.txStore.SetTx(wtx)
-	txmp.priorityIndex.PushTx(wtx)
-	txmp.heightIndex.Insert(wtx)
-	txmp.timestampIndex.Insert(wtx)
-
-	// Insert the transaction into the gossip index and mark the reference to the
-	// linked-list element, which will be needed at a later point when the
-	// transaction is removed.
-	gossipEl := txmp.gossipIndex.PushBack(wtx)
-	wtx.gossipEl = gossipEl
-
-	atomic.AddInt64(&txmp.sizeBytes, int64(wtx.Size()))
+	elt := txmp.txs.PushBack(wtx)
+	txmp.txByKey[wtx.tx.Key()] = elt
+	if wtx.sender != "" {
+		txmp.txBySender[wtx.sender] = elt
+	}
+	atomic.AddInt64(&txmp.txsBytes, wtx.Size())
 }
 
 func (txmp *TxMempool) removeTx(wtx *WrappedTx, removeFromCache bool) {
