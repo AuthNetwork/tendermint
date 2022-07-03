@@ -255,10 +255,13 @@ func (txmp *TxMempool) RemoveTxByKey(txKey types.TxKey) error {
 // The caller must hold txmp.mtx excluxively.
 func (txmp *TxMempool) removeTxByKey(key types.TxKey) error {
 	if elt, ok := txmp.txByKey[key]; ok {
+		w := elt.Value.(*WrappedTx)
 		delete(txmp.txByKey, key)
-		delete(txmp.txBySender, elt.Value.(*WrappedTx).sender)
+		delete(txmp.txBySender, w.sender)
 		txmp.txs.Remove(elt)
 		elt.DetachPrev()
+		elt.DetachNext()
+		atomic.AddInt64(&txmp.txsBytes, -int64(len(w.tx)))
 		return nil
 	}
 	return fmt.Errorf("transaction %x not found", key)
@@ -272,6 +275,8 @@ func (txmp *TxMempool) removeTxByElement(elt *clist.CElement) {
 	delete(txmp.txBySender, w.sender)
 	txmp.txs.Remove(elt)
 	elt.DetachPrev()
+	elt.DetachNext()
+	atomic.AddInt64(&txmp.txsbytes, -int64(len(w.tx)))
 }
 
 // Flush purges the contents of the mempool and the cache, leaving both empty.
@@ -280,10 +285,14 @@ func (txmp *TxMempool) Flush() {
 	txmp.mtx.Lock()
 	defer txmp.mtx.Unlock()
 
-	atomic.SwapInt64(&txmp.txsBytes, 0)
-	txmp.txs = clist.New()
-	txmp.txByKey = make(map[types.TxKey]*clist.CElement)
-	txmp.txBySender = make(map[string]*clist.CElement)
+	// Remove all the transactions in the list explicitsly, so that the sizes
+	// and indexes get updated properly.
+	cur := txmp.txs.Front()
+	for cur != nil {
+		next := cur.Next()
+		txmp.removeTxByElement(cur)
+		cur = next
+	}
 	txmp.cache.Reset()
 
 	// N.B. Flushing does not update the recheck cursors, so that pending
