@@ -402,8 +402,7 @@ func (txmp *TxMempool) Update(
 		_ = txmp.removeTxByKey(tx.Key())
 	}
 
-	// FIXME: implement this
-	//txmp.purgeExpiredTxs(blockHeight)
+	txmp.purgeExpiredTxs(blockHeight)
 
 	// If there any uncommitted transactions left in the mempool, we either
 	// initiate re-CheckTx per remaining transaction or notify that remaining
@@ -760,53 +759,26 @@ func (txmp *TxMempool) removeTx(wtx *WrappedTx, removeFromCache bool) {
 	}
 }
 
-// purgeExpiredTxs removes all transactions that have exceeded their respective
-// height and/or time based TTLs from their respective indexes. Every expired
-// transaction will be removed from the mempool entirely, except for the cache.
+// purgeExpiredTxs removes all transactions from the mempool that have exceeded
+// their respective height or time-based limits as of the given blockHeight.
+// Transactions removed by this operation are not removed from the cache.
 //
-// NOTE: purgeExpiredTxs must only be called during TxMempool#Update in which
-// the caller has a write-lock on the mempool and so we can safely iterate over
-// the height and time based indexes.
+// The caller must hold txmp.mtx exclusively.
 func (txmp *TxMempool) purgeExpiredTxs(blockHeight int64) {
 	now := time.Now()
-	expiredTxs := make(map[types.TxKey]*WrappedTx)
+	cur := txmp.txs.Front()
+	for cur != nil {
+		// N.B. Grab the next element first, since if we remove cur its successor
+		// will be invalidated.
+		next := cur.Next()
 
-	if txmp.config.TTLNumBlocks > 0 {
-		purgeIdx := -1
-		for i, wtx := range txmp.heightIndex.txs {
-			if (blockHeight - wtx.height) > txmp.config.TTLNumBlocks {
-				expiredTxs[wtx.tx.Key()] = wtx
-				purgeIdx = i
-			} else {
-				// since the index is sorted, we know no other txs can be be purged
-				break
-			}
+		w := cur.Value.(*WrappedTx)
+		if (blockHeight - w.height) > txmp.config.TTLNumBlocks {
+			txmp.removeTxByElement(cur)
+		} else if now.Sub(w.timestamp) > txmp.config.TTLDuration {
+			txmp.removeTxByElement(cur)
 		}
-
-		if purgeIdx >= 0 {
-			txmp.heightIndex.txs = txmp.heightIndex.txs[purgeIdx+1:]
-		}
-	}
-
-	if txmp.config.TTLDuration > 0 {
-		purgeIdx := -1
-		for i, wtx := range txmp.timestampIndex.txs {
-			if now.Sub(wtx.timestamp) > txmp.config.TTLDuration {
-				expiredTxs[wtx.tx.Key()] = wtx
-				purgeIdx = i
-			} else {
-				// since the index is sorted, we know no other txs can be be purged
-				break
-			}
-		}
-
-		if purgeIdx >= 0 {
-			txmp.timestampIndex.txs = txmp.timestampIndex.txs[purgeIdx+1:]
-		}
-	}
-
-	for _, wtx := range expiredTxs {
-		txmp.removeTx(wtx, false)
+		cur = next
 	}
 }
 
