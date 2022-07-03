@@ -241,12 +241,20 @@ func (txmp *TxMempool) CheckTx(
 	return nil
 }
 
+// RemoveTxByKey removes the transaction with the specified key from the
+// mempool. It reports an error if no such transaction exists.  This operation
+// does not remove the transaction from the cache.
 func (txmp *TxMempool) RemoveTxByKey(txKey types.TxKey) error {
 	txmp.mtx.Lock()
 	defer txmp.mtx.Unlock()
+	return txmp.removeTxByKey(txKey)
+}
 
-	if elt, ok := txmp.txByKey[txKey]; ok {
-		delete(txmp.txByKey, txKey)
+// removeTxByKey removes the specified transaction key from the mempool.
+// The caller must hold txmp.mtx excluxively.
+func (txmp *TxMempool) removeTxByKey(key types.TxKey) error {
+	if elt, ok := txmp.txByKey[key]; ok {
+		delete(txmp.txByKey, key)
 		delete(txmp.txBySender, elt.Value.(*WrappedTx).sender)
 		txmp.txs.Remove(elt)
 		elt.DetachPrev()
