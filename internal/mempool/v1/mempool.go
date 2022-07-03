@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -269,56 +270,40 @@ func (txmp *TxMempool) Flush() {
 	txmp.cache.Reset()
 }
 
-// ReapMaxBytesMaxGas returns a list of transactions within the provided size
-// and gas constraints. Transaction are retrieved in priority order.
+// ReapMaxBytesMaxGas returns a slice of valid transactions that fit within the
+// size and gas constraints. The results are ordered by nonincreasing priority,
+// with ties broken by increasing order of arrival.  Reaping transactions does
+// not remove them from the mempool.
 //
-// NOTE:
-// - A read-lock is acquired.
-// - Transactions returned are not actually removed from the mempool transaction
-//   store or indexes.
+// If the mempool is empty or has no transactions fitting within the given
+// constraints, the result will also be empty.
 func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
 	txmp.mtx.RLock()
 	defer txmp.mtx.RUnlock()
 
-	var (
-		totalGas  int64
-		totalSize int64
-	)
-
-	// wTxs contains a list of *WrappedTx retrieved from the priority queue that
-	// need to be re-enqueued prior to returning.
-	wTxs := make([]*WrappedTx, 0, txmp.priorityIndex.NumTxs())
-	defer func() {
-		for _, wtx := range wTxs {
-			txmp.priorityIndex.PushTx(wtx)
-		}
-	}()
-
-	txs := make([]types.Tx, 0, txmp.priorityIndex.NumTxs())
-	for txmp.priorityIndex.NumTxs() > 0 {
-		wtx := txmp.priorityIndex.PopTx()
-		txs = append(txs, wtx.tx)
-		wTxs = append(wTxs, wtx)
-		size := types.ComputeProtoSizeForTxs([]types.Tx{wtx.tx})
-
-		// Ensure we have capacity for the transaction with respect to the
-		// transaction size.
-		if maxBytes > -1 && totalSize+size > maxBytes {
-			return txs[:len(txs)-1]
-		}
-
-		totalSize += size
-
-		// ensure we have capacity for the transaction with respect to total gas
-		gas := totalGas + wtx.gasWanted
-		if maxGas > -1 && gas > maxGas {
-			return txs[:len(txs)-1]
-		}
-
-		totalGas = gas
+	all := make([]*WrappedTx, 0, len(txmp.txByKey))
+	for _, tx := range txmp.txByKey {
+		all = append(all, tx.Value.(*WrappedTx))
 	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].priority == all[j].priority {
+			return all[i].timestamp.Before(all[j].timestamp)
+		}
+		return all[i].priority > all[j].priority // N.B. higher priorities first
+	})
 
-	return txs
+	var totalGas, totalBytes int64
+
+	var keep []types.Tx
+	for _, w := range all {
+		totalGas += w.gasWanted
+		totalBytes += int64(len(w.tx))
+		if totalGas > maxGas || totalBytes > maxBytes {
+			break
+		}
+		keep = append(keep, w.tx)
+	}
+	return keep
 }
 
 // ReapMaxTxs returns a list of transactions within the provided number of
