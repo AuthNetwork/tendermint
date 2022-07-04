@@ -41,8 +41,9 @@ type TxMempool struct {
 	cache        mempool.TxCache // seen transactions
 
 	// Atomically-updated fields
-	height   int64 // atomic: the latest height passed to Update
-	txsBytes int64 // atomic: the total size of all transactions in the mempool, in bytes
+	height    int64 // atomic: the latest height passed to Update
+	txsBytes  int64 // atomic: the total size of all transactions in the mempool, in bytes
+	txRecheck int64 // atomic: the number of pending recheck calls
 
 	// Synchronized fields, protected by mtx.
 	mtx                  *sync.RWMutex
@@ -619,6 +620,11 @@ func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) 
 		return
 	}
 
+	numLeft := atomic.AddInt64(&txmp.txRecheck, -1)
+	if numLeft <= 0 {
+		defer txmp.notifyTxsAvailable()
+	}
+
 	txmp.metrics.RecheckTimes.Add(1)
 	tx := types.Tx(req.GetCheckTx().Tx)
 
@@ -657,7 +663,8 @@ func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) 
 }
 
 // recheckTransactions initiates re-CheckTx ABCI calls for all the transactions
-// currently in the mempool.
+// currently in the mempool. It reports the number of recheck calls that were
+// successfully initiated.
 //
 // Precondition: The mempool is not empty.
 // The caller must hold txmp.mtx exclusively.
@@ -674,6 +681,7 @@ func (txmp *TxMempool) recheckTransactions() {
 	defer txmp.mtx.Lock()
 
 	ctx := context.TODO()
+	atomic.StoreInt64(&txmp.txRecheck, int64(txmp.txs.Len()))
 	for e := txmp.txs.Front(); e != nil; e = e.Next() {
 		wtx := e.Value.(*WrappedTx)
 
@@ -684,6 +692,7 @@ func (txmp *TxMempool) recheckTransactions() {
 		if err != nil {
 			txmp.logger.Error("failed to execute CheckTx during recheck",
 				"err", err, "hash", fmt.Sprintf("%x", wtx.tx.Hash()))
+			atomic.AddInt64(&txmp.txRecheck, -1)
 		}
 	}
 
@@ -736,7 +745,7 @@ func (txmp *TxMempool) purgeExpiredTxs(blockHeight int64) {
 
 func (txmp *TxMempool) notifyTxsAvailable() {
 	if txmp.Size() == 0 {
-		panic("attempt to notify txs available but mempool is empty!")
+		return // nothing to do
 	}
 
 	if txmp.txsAvailable != nil && !txmp.notifiedTxsAvailable {
