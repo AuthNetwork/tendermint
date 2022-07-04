@@ -162,9 +162,10 @@ func (txmp *TxMempool) TxsAvailable() <-chan struct{} { return txmp.txsAvailable
 // application response.
 //
 // If the application accepts the transaction and the mempool is full, the
-// mempool evicts the lowest-priority transaction whose priority is (strictly)
-// lower than the priority of tx, and adds tx instead. If no such transaction
-// exists, tx is discarded.
+// mempool evicts one or more of the lowest-priority transaction whose priority
+// is (strictly) lower than the priority of tx and whose size together exceeds
+// the size of tx, and adds tx instead. If no such transactions exist, tx is
+// discarded.
 func (txmp *TxMempool) CheckTx(
 	ctx context.Context,
 	tx types.Tx,
