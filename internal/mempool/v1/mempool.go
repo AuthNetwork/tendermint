@@ -443,9 +443,9 @@ func (txmp *TxMempool) Update(
 	return nil
 }
 
-// initTxCallback handle the ABCI CheckTx response for the first time a
-// transaction is added to the mempool, rather than a recheck after a block is
-// committed.
+// initTxCallback handles the ABCI CheckTx response for the first time a
+// transaction is added to the mempool.  A recheck after a block is committed
+// goes to the default callback (see recheckTxCallback).
 //
 // If either the application rejected the transaction or a post-check hook is
 // defined and rejects the transaction, it is discarded.
