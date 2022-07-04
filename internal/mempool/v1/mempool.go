@@ -293,8 +293,9 @@ func (txmp *TxMempool) Flush() {
 	}
 	txmp.cache.Reset()
 
-	// N.B. Flushing does not update the recheck cursors, so that pending
-	// rechecks can still complete.
+	// Discard any pending recheck calls that may be in flight.  The calls will
+	// still complete, but will have no effect on the mempool.
+	atomic.StoreInt64(&txmp.txRecheck, 0)
 }
 
 // allEntriesSorted returns a slice of all the transactions currently in the
