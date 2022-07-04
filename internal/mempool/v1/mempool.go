@@ -208,27 +208,34 @@ func (txmp *TxMempool) CheckTx(
 
 	// Initiate an ABCI CheckTx for this transaction. The callback is
 	// responsible for adding the transaction to the pool if it survives.
-	reqRes, err := txmp.proxyAppConn.CheckTxAsync(ctx, abci.RequestCheckTx{Tx: tx})
-	if err != nil {
-		txmp.cache.Remove(tx)
-		return err
-	}
+	return func() error {
+		// N.B.: We have to issue the call outside the lock. In a local client,
+		// even an "async" call invokes its callback immediately which will make
+		// the callback deadlock trying to acquire the same lock. This isn't a
+		// problem with out-of-process calls, but this has to work for both.
+		txmp.mtx.RUnlock()
+		defer txmp.mtx.RLock()
 
-	reqRes.SetCallback(func(res *abci.Response) {
-		wtx := &WrappedTx{
-			tx:        tx,
-			hash:      txKey,
-			timestamp: time.Now().UTC(),
-			height:    txmp.height,
+		reqRes, err := txmp.proxyAppConn.CheckTxAsync(ctx, abci.RequestCheckTx{Tx: tx})
+		if err != nil {
+			txmp.cache.Remove(tx)
+			return err
 		}
-		wtx.SetPeer(txInfo.SenderID)
-		txmp.initTxCallback(wtx, res)
-		if cb != nil {
-			cb(res)
-		}
-	})
-
-	return nil
+		reqRes.SetCallback(func(res *abci.Response) {
+			wtx := &WrappedTx{
+				tx:        tx,
+				hash:      txKey,
+				timestamp: time.Now().UTC(),
+				height:    txmp.height,
+			}
+			wtx.SetPeer(txInfo.SenderID)
+			txmp.initTxCallback(wtx, res)
+			if cb != nil {
+				cb(res)
+			}
+		})
+		return nil
+	}()
 }
 
 // RemoveTxByKey removes the transaction with the specified key from the
@@ -663,6 +670,8 @@ func (txmp *TxMempool) recheckTransactions() {
 		"num_txs", txmp.Size(),
 		"height", txmp.height,
 	)
+	txmp.mtx.Unlock()
+	defer txmp.mtx.Lock()
 
 	ctx := context.TODO()
 	for e := txmp.txs.Front(); e != nil; e = e.Next() {
