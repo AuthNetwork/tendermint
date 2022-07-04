@@ -258,7 +258,7 @@ func (txmp *TxMempool) removeTxByKey(key types.TxKey) error {
 		txmp.txs.Remove(elt)
 		elt.DetachPrev()
 		elt.DetachNext()
-		atomic.AddInt64(&txmp.txsBytes, -int64(len(w.tx)))
+		atomic.AddInt64(&txmp.txsBytes, -w.Size())
 		return nil
 	}
 	return fmt.Errorf("transaction %x not found", key)
