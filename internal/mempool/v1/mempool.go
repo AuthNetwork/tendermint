@@ -611,7 +611,7 @@ func (txmp *TxMempool) insertTx(wtx *WrappedTx) {
 }
 
 // recheckTxCallback handles the responses from ABCI CheckTx calls issued
-// during the recheck phase of a block Update. It updates the recheck cursors
+// during the recheck phase of a block Update. It updates the recheck counter
 // and removes any transactions invalidated by the application.
 //
 // This callback is NOT executed for the initial CheckTx on a new transaction;
@@ -682,7 +682,7 @@ func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) 
 // The caller must hold txmp.mtx exclusively.
 func (txmp *TxMempool) recheckTransactions() {
 	if txmp.Size() == 0 {
-		panic("mempool: cannot update recheck cursors on an empty mempool")
+		panic("mempool: cannot run recheck on an empty mempool")
 	}
 	txmp.logger.Debug(
 		"executing re-CheckTx for all remaining transactions",
