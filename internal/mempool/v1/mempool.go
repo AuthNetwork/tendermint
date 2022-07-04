@@ -74,6 +74,7 @@ func NewTxMempool(
 		metrics:      mempool.NopMetrics(),
 		cache:        mempool.NopTxCache{},
 		txs:          clist.New(),
+		mtx:          new(sync.RWMutex),
 		txByKey:      make(map[types.TxKey]*clist.CElement),
 		txBySender:   make(map[string]*clist.CElement),
 	}
@@ -571,13 +572,7 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response) {
 	txmp.metrics.TxSizeBytes.Observe(float64(wtx.Size()))
 	txmp.metrics.Size.Set(float64(txmp.Size()))
 
-	elt := txmp.txs.PushBack(wtx)
-	txmp.txByKey[wtx.tx.Key()] = elt
-	if s := wtx.Sender(); s != "" {
-		txmp.txBySender[s] = elt
-	}
-
-	atomic.AddInt64(&txmp.txsBytes, wtx.Size())
+	txmp.insertTx(wtx)
 	txmp.logger.Debug(
 		"inserted new valid transaction",
 		"priority", wtx.Priority(),
@@ -586,6 +581,16 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response) {
 		"num_txs", txmp.Size(),
 	)
 	txmp.notifyTxsAvailable()
+}
+
+func (txmp *TxMempool) insertTx(wtx *WrappedTx) {
+	elt := txmp.txs.PushBack(wtx)
+	txmp.txByKey[wtx.tx.Key()] = elt
+	if s := wtx.Sender(); s != "" {
+		txmp.txBySender[s] = elt
+	}
+
+	atomic.AddInt64(&txmp.txsBytes, wtx.Size())
 }
 
 // recheckTxCallback handles the responses from ABCI CheckTx calls issued
