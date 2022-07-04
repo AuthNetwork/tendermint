@@ -36,6 +36,14 @@ func (w *WrappedTx) SetPeer(id uint16) {
 	}
 }
 
+// HasPeer reports whether the specified peer ID is a sender of w.
+func (w *WrappedTx) HasPeer(id uint16) bool {
+	w.mtx.Lock()
+	defer w.mtx.Unlock()
+	_, ok := w.peers[id]
+	return ok
+}
+
 // SetGasWanted sets the application-assigned gas requirement of w.
 func (w *WrappedTx) SetGasWanted(gas int64) {
 	w.mtx.Lock()
