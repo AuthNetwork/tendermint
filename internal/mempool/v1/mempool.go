@@ -450,10 +450,10 @@ func (txmp *TxMempool) Update(
 // If either the application rejected the transaction or a post-check hook is
 // defined and rejects the transaction, it is discarded.
 //
-// Otherwise, if the mempool is full, check for a lower-priority transaction
-// that can be evicted to make room for the new one. If no such transaction
-// exists, this transaction is logged and dropped; otherwise the selected
-// transaction is evicted.
+// Otherwise, if the mempool is full, check for lower-priority transactions
+// that can be evicted to make room for the new one. If no such transactions
+// exist, this transaction is logged and dropped; otherwise the selected
+// transactions are evicted.
 //
 // Finally, the new transaction is added and size stats updated.
 func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response) {
