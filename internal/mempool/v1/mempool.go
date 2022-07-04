@@ -632,6 +632,9 @@ func (txmp *TxMempool) recheckTxCallback(req *abci.Request, res *abci.Response) 
 	numLeft := atomic.AddInt64(&txmp.txRecheck, -1)
 	if numLeft <= 0 {
 		defer txmp.notifyTxsAvailable()
+		if numLeft < 0 {
+			return
+		}
 	}
 
 	txmp.metrics.RecheckTimes.Add(1)
