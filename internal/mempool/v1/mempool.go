@@ -321,6 +321,9 @@ func (txmp *TxMempool) allEntriesSorted() []*WrappedTx {
 // with ties broken by increasing order of arrival.  Reaping transactions does
 // not remove them from the mempool.
 //
+// If maxBytes < 0, no limit is set on the total size in bytes.
+// If maxGas < 0, no limit is set on the total gas cost.
+//
 // If the mempool is empty or has no transactions fitting within the given
 // constraints, the result will also be empty.
 func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
@@ -330,7 +333,7 @@ func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
 	for _, w := range txmp.allEntriesSorted() {
 		totalGas += w.gasWanted
 		totalBytes += w.Size()
-		if totalGas > maxGas || totalBytes > maxBytes {
+		if (maxGas >= 0 && totalGas > maxGas) || (maxBytes >= 0 && totalBytes > maxBytes) {
 			break
 		}
 		keep = append(keep, w.tx)
@@ -350,13 +353,15 @@ func (txmp *TxMempool) TxsFront() *clist.CElement { return txmp.txs.Front() }
 // ordered by nonincreasing priority with ties broken by increasing order of
 // arrival. Reaping transactions does not remove them from the mempool.
 //
+// If max < 0, all transactions in the mempool are reaped.
+//
 // The result may have fewer than max elements (possibly zero) if the mempool
 // does not have that many transactions available.
 func (txmp *TxMempool) ReapMaxTxs(max int) types.Txs {
 	var keep []types.Tx
 
 	for _, w := range txmp.allEntriesSorted() {
-		if len(keep) >= max {
+		if max >= 0 && len(keep) >= max {
 			break
 		}
 		keep = append(keep, w.tx)
