@@ -329,6 +329,14 @@ func (txmp *TxMempool) ReapMaxBytesMaxGas(maxBytes, maxGas int64) types.Txs {
 	return keep
 }
 
+// TxsWaitChan returns a channel that is closed when there is at least one
+// transaction available to be gossiped.
+func (txmp *TxMempool) TxsWaitChan() <-chan struct{} { return txmp.txs.WaitChan() }
+
+// TxsFront returns the frontmost element of the pending transaction list.
+// It will be nil if the mempool is empty.
+func (txmp *TxMempool) TxsFront() *clist.CElement { return txmp.txs.Front() }
+
 // ReapMaxTxs returns up to max transactions from the mempool. The results are
 // ordered by nonincreasing priority with ties broken by increasing order of
 // arrival. Reaping transactions does not remove them from the mempool.
