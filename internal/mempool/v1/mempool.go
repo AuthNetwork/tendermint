@@ -518,9 +518,10 @@ func (txmp *TxMempool) initTxCallback(wtx *WrappedTx, res *abci.Response) {
 	}
 
 	// At this point the application has ruled the transaction valid, but the
-	// mempool might be full. If so, find the lowest-priority item with lower
-	// priority than the application assigned to this new one, and evict it in
-	// favor of tx. If no such item exists, we discard tx.
+	// mempool might be full. If so, find the lowest-priority items with lower
+	// priority than the application assigned to this new one, and evict as many
+	// of them as necessary to make room for tx. If no such items exist, we
+	// discard tx.
 
 	if err := txmp.canAddTx(wtx); err != nil {
 		var victims []*clist.CElement // eligible transactions for eviction
