@@ -128,7 +128,8 @@ func (txmp *TxMempool) SizeBytes() int64 { return atomic.LoadInt64(&txmp.txsByte
 
 // FlushAppConn executes FlushSync on the mempool's proxyAppConn.
 //
-// NOTE: The caller must obtain a write-lock via Lock() prior to execution.
+// The caller must hold an exclusive mempool lock (by calling txmp.Lock) before
+// calling FlushAppConn.
 func (txmp *TxMempool) FlushAppConn() error {
 	return txmp.proxyAppConn.FlushSync(context.Background())
 }
