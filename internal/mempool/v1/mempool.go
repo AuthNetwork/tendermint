@@ -29,7 +29,7 @@ type TxMempoolOption func(*TxMempool)
 // first.  When evicting transactions from the mempool for size constraints,
 // lower-priority transactions are evicted sooner.
 //
-// Within the mempool, transactions are ordered in order of arrival, and are
+// Within the mempool, transactions are ordered by time of arrival, and are
 // gossiped to the rest of the network based on that order (gossip order does
 // not take priority into account).
 type TxMempool struct {
