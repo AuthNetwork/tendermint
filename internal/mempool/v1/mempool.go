@@ -216,6 +216,7 @@ func (txmp *TxMempool) CheckTx(
 		// even an "async" call invokes its callback immediately which will make
 		// the callback deadlock trying to acquire the same lock. This isn't a
 		// problem with out-of-process calls, but this has to work for both.
+		height := txmp.height
 		txmp.mtx.RUnlock()
 		defer txmp.mtx.RLock()
 
@@ -229,7 +230,7 @@ func (txmp *TxMempool) CheckTx(
 				tx:        tx,
 				hash:      txKey,
 				timestamp: time.Now().UTC(),
-				height:    txmp.height,
+				height:    height,
 			}
 			wtx.SetPeer(txInfo.SenderID)
 			txmp.initTxCallback(wtx, res)
