@@ -44,7 +44,7 @@ func main() {
 	//	* Provide their own DB implementation
 	// can copy this file and use something other than the
 	// node.NewDefault function
-	nodeFunc := node.NewDefault
+	nodeFunc := node.NewWithWait
 
 	// Create & start node
 	rootCmd.AddCommand(cmd.NewRunNodeCmd(nodeFunc))

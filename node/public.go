@@ -2,14 +2,16 @@
 package node
 
 import (
+	"errors"
 	"fmt"
-
 	abciclient "github.com/tendermint/tendermint/abci/client"
 	"github.com/tendermint/tendermint/config"
 	"github.com/tendermint/tendermint/libs/log"
 	"github.com/tendermint/tendermint/libs/service"
 	"github.com/tendermint/tendermint/privval"
 	"github.com/tendermint/tendermint/types"
+	"os"
+	"time"
 )
 
 // NewDefault constructs a tendermint node service for use in go
@@ -63,4 +65,48 @@ func New(conf *config.Config,
 	default:
 		return nil, fmt.Errorf("%q is not a valid mode", conf.Mode)
 	}
+}
+
+// NewWithWait constructs a tendermint node service for use in go
+// process that host their own process-local tendermint node. This
+// waits for the dkg-node to populate the config first
+func NewWithWait(conf *config.Config,
+	logger log.Logger) (service.Service, error) {
+	// Wait till the dkg-node has written the configs to the disk
+
+	for {
+		time.Sleep(10 * time.Second)
+		// genesis.json
+		if _, err := os.Stat(conf.GenesisFile()); errors.Is(err, os.ErrNotExist) {
+			logger.Info("Waiting for genesis.json to be created")
+			continue
+		}
+
+		// node_key.json
+		if _, err := os.Stat(conf.NodeKeyFile()); errors.Is(err, os.ErrNotExist) {
+			logger.Info("Waiting for node_key.json to be created")
+			continue
+		}
+
+		// priv-validator.json
+		if _, err := os.Stat(conf.PrivValidator.KeyFile()); errors.Is(err, os.ErrNotExist) {
+			logger.Info("Waiting for priv-validator.json to be created")
+			continue
+		}
+
+		// config.toml
+		if _, err := os.Stat(conf.File()); errors.Is(err, os.ErrNotExist) {
+			logger.Info("Waiting for config.toml to be created")
+			continue
+		}
+
+		break
+	}
+
+	// Wait for 60 seconds to ensure that the rest of the cluster is online
+	// TODO: find a better solution
+	time.Sleep(60 * time.Second)
+	logger.Info("Starting tendermint node")
+
+	return newDefaultNode(conf, logger)
 }

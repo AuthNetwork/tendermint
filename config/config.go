@@ -279,6 +279,11 @@ func (cfg BaseConfig) GenesisFile() string {
 	return rootify(cfg.Genesis, cfg.RootDir)
 }
 
+// File returns the full path to the config.toml file
+func (cfg BaseConfig) File() string {
+	return rootify(fmt.Sprintf("%v/%v", defaultConfigDir, defaultConfigFileName), cfg.RootDir)
+}
+
 // NodeKeyFile returns the full path to the node_key.json file
 func (cfg BaseConfig) NodeKeyFile() string {
 	return rootify(cfg.NodeKey, cfg.RootDir)
