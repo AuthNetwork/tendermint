@@ -41,7 +41,6 @@ type TxMempool struct {
 	cache        mempool.TxCache // seen transactions
 
 	// Atomically-updated fields
-	height    int64 // atomic: the latest height passed to Update
 	txsBytes  int64 // atomic: the total size of all transactions in the mempool, in bytes
 	txRecheck int64 // atomic: the number of pending recheck calls
 
@@ -51,6 +50,7 @@ type TxMempool struct {
 	txsAvailable         chan struct{} // one value sent per height when mempool is not empty
 	preCheck             mempool.PreCheckFunc
 	postCheck            mempool.PostCheckFunc
+	height               int64 // the latest height passed to Update
 
 	txs        *clist.CList // valid transactions (passed CheckTx)
 	txByKey    map[types.TxKey]*clist.CElement
@@ -71,11 +71,11 @@ func NewTxMempool(
 		logger:       logger,
 		config:       cfg,
 		proxyAppConn: proxyAppConn,
-		height:       height,
 		metrics:      mempool.NopMetrics(),
 		cache:        mempool.NopTxCache{},
 		txs:          clist.New(),
 		mtx:          new(sync.RWMutex),
+		height:       height,
 		txByKey:      make(map[types.TxKey]*clist.CElement),
 		txBySender:   make(map[string]*clist.CElement),
 	}
