@@ -1,4 +1,4 @@
-module github.com/authnetwork/tendermint
+module github.com/tendermint/tendermint
 
 go 1.16
 
