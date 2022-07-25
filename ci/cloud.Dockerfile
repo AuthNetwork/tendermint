@@ -4,7 +4,7 @@ RUN apk update && \
     apk upgrade && \
     apk --no-cache add make
 WORKDIR /tendermint
-ADD .. ./
+ADD . ./
 RUN make build-linux
 
 # stage 2
@@ -47,7 +47,7 @@ COPY --from=builder /tendermint/build/tendermint /usr/bin/tendermint
 # CMD to add parameters to `tendermint node`.
 ENV PROXY_APP=dkg-node CHAIN_ID=main-chain-BLUBLU
 
-COPY ../ci/docker-entrypoint.sh /usr/local/bin/
+COPY ./ci/docker-entrypoint.sh /usr/local/bin/
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "--proxy-app=tcp://dkgnode:26655"]

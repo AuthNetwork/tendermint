@@ -39,9 +39,9 @@ COPY --from=builder /tendermint/build/tendermint /usr/bin/tendermint
 # You can overwrite these before the first run to influence
 # config.json and genesis.json. Additionally, you can override
 # CMD to add parameters to `tendermint node`.
-ENV PROXY_APP=dkg-node CHAIN_ID=main-chain-BLUBLU
+ENV CHAIN_ID=main-chain-BLUBLU
 
-COPY ./DOCKER/docker-entrypoint.sh /usr/local/bin/
+COPY ./ci/docker-entrypoint.sh /usr/local/bin/
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "--proxy-app=tcp://localhost:26655"]
